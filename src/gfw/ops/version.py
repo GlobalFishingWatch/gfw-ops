@@ -3,4 +3,4 @@
 import importlib.metadata
 
 
-__version__ = importlib.metadata.version("python-app-template")
+__version__ = importlib.metadata.version("gfw-ops")

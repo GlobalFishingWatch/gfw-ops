@@ -52,7 +52,7 @@ and the [docker compose] plugin. No other system dependencies are required.
 
 1. First, clone the repository.
 ```shell
-git clone https://github.com/GlobalFishingWatch/python-app-template.git
+git clone https://github.com/GlobalFishingWatch/gfw-ops.git
 ```
 
 2. Make sure you can build the docker image:

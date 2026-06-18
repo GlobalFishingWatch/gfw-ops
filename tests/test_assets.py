@@ -1,7 +1,7 @@
 import json
 from importlib import resources
 
-from python_app_template import assets
+from gfw.ops import assets
 
 
 def test_data():
