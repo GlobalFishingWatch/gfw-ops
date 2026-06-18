@@ -15,7 +15,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: 3.12
+          python-version: 3.13
 
       - name: Install flake8
         run: pip --disable-pip-version-check install flake8
@@ -30,7 +30,7 @@ jobs:
       fail-fast: true
       matrix:
         os: ["ubuntu-latest"]
-        python-version: ["3.13"]
+        python-version: ["3.14"]
     env:
       VENV: .venv
 
@@ -62,13 +62,13 @@ jobs:
           make test
 
       - name: Upload coverage reports to Codecov
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && matrix.python-version == '3.12'
+        if: github.ref == 'refs/heads/main' && matrix.python-version == '3.14'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   tests-in-docker:
-    name: tests - Python 3.12 on Docker
+    name: tests - Python 3.13 on Docker
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

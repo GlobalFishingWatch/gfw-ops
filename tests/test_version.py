@@ -1,4 +1,4 @@
-from gfw_ops import version
+from gfw.ops import version
 
 
 def test_version():

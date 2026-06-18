@@ -5,33 +5,32 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 exclude = ["tests*"]
-namespaces = false
+namespaces = true
 
 [tool.setuptools.package-data]
 "assets" = ["*"]
 
 [project]
 name = "gfw-ops"
-version = "0.2.2"
-description = "A template for python (dockerized) applications."
+version = "0.1.0"
+description = "Reusable operational data engineering tools for GFW projects."
 readme = "README.md"
 license = "Apache-2.0"
 authors = [
-    { name = "Tomás J. Link", email = "tomas.link@globalfishingwatch.org" },
+    { name = "GFW Engineering Team", email = "engineering-team@globalfishingwatch.org" },
 ]
 maintainers = [
     { name = "Tomás J. Link", email = "tomas.link@globalfishingwatch.org" },
 ]
 classifiers = [
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-
+    "Programming Language :: Python :: 3.14",
 ]
-requires-python = ">= 3.9"
+requires-python = ">= 3.12"
 dependencies = [
+    "gfw-common~=0.11",
     "pyyaml~=6.0",
     "rich~=14.0",
     "rich-argparse~=1.6",
@@ -45,7 +44,7 @@ Repository = "https://github.com/GlobalFishingWatch/gfw-ops"
 Issues = "https://github.com/GlobalFishingWatch/gfw-ops/issues"
 
 [project.scripts]
-gfw-ops = "gfw_ops.cli.main:main"
+gfw-ops = "gfw.ops.cli.main:main"
 
 [project.optional-dependencies]
 # Linting and code quality tools
@@ -140,7 +139,7 @@ disallow_untyped_calls = false
 [tool.pytest.ini_options]
 minversion = "6.0"
 testpaths = ["tests"]
-addopts = "-v --cov=gfw_ops --cov=init_project --cov-report=term-missing"
+addopts = "-v --cov=src --cov=init_project --cov-report=term-missing"
 
 [tool.coverage.run]
 branch = true

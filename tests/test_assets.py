@@ -1,7 +1,7 @@
 import json
 from importlib import resources
 
-from gfw_ops import assets
+from gfw.ops import assets
 
 
 def test_data():

@@ -1,4 +1,4 @@
-from gfw_ops.cli.main import main
+from gfw.ops.cli.main import main
 
 
 def test_main():
