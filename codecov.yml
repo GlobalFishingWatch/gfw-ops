@@ -1,0 +1,4 @@
+coverage:  # Avoid failing CI jobs because of coverage.
+    status:
+        patch: off
+        project: off

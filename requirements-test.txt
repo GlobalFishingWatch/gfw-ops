@@ -1,0 +1,7 @@
+# We want to be able to install only test dependencies, for example when testing an already installed package.
+# Currently, is not possible to install only dependencies from pyproject.toml.
+# For that, we use this file to specify the test dependencies required.
+
+pytest~=8.3            # Core testing framework.
+pytest-cov~=6.0        # Coverage plugin for pytest.
+pytest-mock~=3.14      # Mocking plugin for pytest.
