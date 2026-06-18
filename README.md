@@ -1,17 +1,17 @@
-<h1 align="center" style="border-bottom: none;">  python-app-template </h1>
+<h1 align="center" style="border-bottom: none;">  gfw-ops </h1>
 
 <p align="center">
-  <a href="https://github.com/GlobalFishingWatch/python-app-template/actions/workflows/main.yaml" >
-    <img src="https://github.com/GlobalFishingWatch/python-app-template/actions/workflows/main.yaml/badge.svg"/>
+  <a href="https://github.com/GlobalFishingWatch/gfw-ops/actions/workflows/main.yaml" >
+    <img src="https://github.com/GlobalFishingWatch/gfw-ops/actions/workflows/main.yaml/badge.svg"/>
   </a>
-  <a href="https://codecov.io/gh/GlobalFishingWatch/python-app-template" >
-    <img src="https://codecov.io/gh/GlobalFishingWatch/python-app-template/graph/badge.svg?token=uZTb6EphP8"/>
+  <a href="https://codecov.io/gh/GlobalFishingWatch/gfw-ops" >
+    <img src="https://codecov.io/gh/GlobalFishingWatch/gfw-ops/graph/badge.svg?token=uZTb6EphP8"/>
   </a>
   <a>
     <img alt="Python versions" src="https://img.shields.io/badge/python-3.12%20%7C%203.13-blue">
   </a>
   <a>
-    <img alt="Last release" src="https://img.shields.io/github/v/release/GlobalFishingWatch/python-app-template">
+    <img alt="Last release" src="https://img.shields.io/github/v/release/GlobalFishingWatch/gfw-ops">
   </a>
 </p>
 
@@ -45,7 +45,7 @@ A template for Python applications.
 [pytest]: https://docs.pytest.org/en/stable/
 [used by pytest-cov]: https://pytest-cov.readthedocs.io/en/latest/config.html
 
-[cli.py]: src/python_app_template/cli.py
+[cli.py]: src/gfw_ops/cli.py
 [docs/contributing]: docs/contributing
 [examples]: examples/
  
@@ -53,8 +53,8 @@ A template for Python applications.
 [.github/]: .github/
 [docs/]: docs/
 [notebooks/]: notebooks/
-[src/python_app_template/]: src/python_app_template 
-[src/python_app_template/assets/]: src/python_app_template/assets/
+[src/gfw_ops/]: src/gfw_ops 
+[src/gfw_ops/assets/]: src/gfw_ops/assets/
 [tests/]: tests/
 
 [.dockerignore]: .dockerignore
@@ -173,8 +173,8 @@ This is a brief summary of all the relevant directories of the repository.
 |[.github/]                       | Configuration for GitHub actions.                                               |
 |[docs/]                          | Markdown files with detailed documentation.                                     |
 |[notebooks/]                     | All jupyter notebooks go here.                                                  |
-|[src/python_app_template/]       | All source code go here.                                                        |
-|[src/python_app_template/assets/]| All data files go here.                                                         |
+|[src/gfw_ops/]       | All source code go here.                                                        |
+|[src/gfw_ops/assets/]| All data files go here.                                                         |
 |[tests/]                         | All tests go here.                                                              |
 
 </div>

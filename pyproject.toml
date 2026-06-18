@@ -11,7 +11,7 @@ namespaces = false
 "assets" = ["*"]
 
 [project]
-name = "python-app-template"
+name = "gfw-ops"
 version = "0.2.2"
 description = "A template for python (dockerized) applications."
 readme = "README.md"
@@ -38,14 +38,14 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/GlobalFishingWatch/python-app-template"
-Documentation = "https://globalfishingwatch.github.io/python-app-template/"
-Changelog = "https://github.com/GlobalFishingWatch/python-app-template/blob/main/CHANGELOG.md"
-Repository = "https://github.com/GlobalFishingWatch/python-app-template"
-Issues = "https://github.com/GlobalFishingWatch/python-app-template/issues"
+Homepage = "https://github.com/GlobalFishingWatch/gfw-ops"
+Documentation = "https://globalfishingwatch.github.io/gfw-ops/"
+Changelog = "https://github.com/GlobalFishingWatch/gfw-ops/blob/main/CHANGELOG.md"
+Repository = "https://github.com/GlobalFishingWatch/gfw-ops"
+Issues = "https://github.com/GlobalFishingWatch/gfw-ops/issues"
 
 [project.scripts]
-python-app-template = "python_app_template.cli.main:main"
+gfw-ops = "gfw_ops.cli.main:main"
 
 [project.optional-dependencies]
 # Linting and code quality tools
@@ -140,7 +140,7 @@ disallow_untyped_calls = false
 [tool.pytest.ini_options]
 minversion = "6.0"
 testpaths = ["tests"]
-addopts = "-v --cov=python_app_template --cov=init_project --cov-report=term-missing"
+addopts = "-v --cov=gfw_ops --cov=init_project --cov-report=term-missing"
 
 [tool.coverage.run]
 branch = true

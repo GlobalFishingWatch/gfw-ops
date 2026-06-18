@@ -1,4 +1,4 @@
-from python_app_template import version
+from gfw_ops import version
 
 
 def test_version():

@@ -17,6 +17,6 @@ images:
   - '${_IMAGE_NAME}:latest'
 timeout: 600s
 substitutions:
-  _IMAGE_NAME: 'gcr.io/${PROJECT_ID}/github.com/globalfishingwatch/python-app-template'
+  _IMAGE_NAME: 'gcr.io/${PROJECT_ID}/github.com/globalfishingwatch/gfw-ops'
 options:
   dynamic_substitutions: true

@@ -7,10 +7,10 @@ mdurl==0.1.2
 pygments==2.19.2
     # via rich
 pyyaml==6.0.3
-    # via python-app-template (pyproject.toml)
+    # via gfw-ops (pyproject.toml)
 rich==14.2.0
     # via
-    #   python-app-template (pyproject.toml)
+    #   gfw-ops (pyproject.toml)
     #   rich-argparse
 rich-argparse==1.7.2
-    # via python-app-template (pyproject.toml)
+    # via gfw-ops (pyproject.toml)
