@@ -1,17 +1,45 @@
+"""GFW operational tools CLI."""
+
+from __future__ import annotations
+
 import sys
-import logging
 
-from ..version import __version__
+from gfw.common.cli import CLI
+from gfw.common.logging import LoggerConfig
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def run(args: list):
-    logger.info("Starting APP (v{})...".format(__version__))
+from gfw.ops.cli.commands.sharded_to_partitioned import ShardedToPartitioned
+from gfw.ops.version import __version__
 
 
-def main():  # Entry point for the python package.
+def run(args: list[str]) -> None:
+    """Entry point for the gfw-ops CLI."""
+    CLI(
+        name="gfw-ops",
+        description="GFW operational data engineering tools.",
+        subcommands=[
+            ShardedToPartitioned,
+        ],
+        version=__version__,
+        examples=(
+            "gfw-ops sharded-to-partitioned --help",
+            (
+                "gfw-ops sharded-to-partitioned"
+                " --bq-in-sharded project.dataset.sharded"
+                " --bq-out-partitioned project.dataset.consolidated"
+                " --execution-project my-project"
+                " --dry-run"
+            ),
+        ),
+        logger_config=LoggerConfig(
+            warning_level=[
+                "urllib3",
+            ],
+        ),
+    ).execute(args)
+
+
+def main() -> None:
+    """CLI entry point."""
     run(sys.argv[1:])
 
 

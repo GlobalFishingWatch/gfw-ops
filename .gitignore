@@ -173,3 +173,4 @@ test/
 
 # UV
 .python-version
+uv.lock

@@ -8,7 +8,7 @@ exclude = ["tests*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"assets" = ["*"]
+"gfw.ops.assets" = ["**/*.sql", "**/*.json"]
 
 [project]
 name = "gfw-ops"
@@ -30,7 +30,8 @@ classifiers = [
 ]
 requires-python = ">= 3.12"
 dependencies = [
-    "gfw-common~=0.11",
+    "gfw-common[bq]~=0.11",
+    "google-cloud-bigquery~=3.0",
     "pyyaml~=6.0",
     "rich~=14.0",
     "rich-argparse~=1.6",
