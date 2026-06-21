@@ -15,7 +15,7 @@ ENV UV_COMPILE_BYTECODE=1
 COPY pyproject.toml requirements.txt README.md MANIFEST.in ./
 RUN uv pip install --system --upgrade pip && \
     uv pip install --system build && \
-    uv pip install --system --prefix=/install -r requirements.txt
+    uv pip install --system --prefix=/install --prerelease=allow -r requirements.txt
 
 COPY src ./src
 RUN uv pip install --system --prefix=/install --no-deps .
@@ -48,7 +48,7 @@ RUN apt-get update && \
 WORKDIR /opt/project
 
 COPY . .
-RUN uv pip install --system -e .[lint,dev,build] && \
+RUN uv pip install --system --prerelease=allow -e .[lint,dev,build] && \
     uv pip install --system -r requirements-test.txt
 
 # ---------------------------------------------------------------------------------------
