@@ -26,7 +26,7 @@ def run(args: list[str]) -> None:
                 "gfw-ops sharded-to-partitioned"
                 " --bq-in-sharded project.dataset.sharded"
                 " --bq-out-partitioned project.dataset.consolidated"
-                " --execution-project my-project"
+                " --project my-project"
                 " --dry-run"
             ),
         ),

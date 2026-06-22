@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from collections.abc import Iterator
+from datetime import date, datetime
 from dataclasses import dataclass
 from functools import cached_property
 from importlib.resources import files
@@ -68,7 +69,6 @@ _env = Environment(
     lstrip_blocks=True,
 )
 
-_DISCOVER_DATES = _env.get_template("discover_dates.sql")
 _DISCOVER_COLUMNS = _env.get_template("discover_columns.sql")
 _EXISTING_PARTITIONS = _env.get_template("existing_partitions.sql")
 _DELETE_MONTH = _env.get_template("delete_month.sql")
@@ -115,18 +115,6 @@ class Table:
         return f"{self.project}.{self.dataset_id}"
 
 
-class DateTables(dict[str, list[Table]]):
-    """A mapping of YYYYMMDD date strings to the source tables that have a shard for that date."""
-
-    def group_by_month(self) -> dict[str, "DateTables"]:
-        """Group dates by YYYYMM month prefix."""
-        months = {}
-        for date, tables in self.items():
-            months.setdefault(date[:6], DateTables())[date] = tables
-
-        return months
-
-
 class ShardedToPartitioned:
     """Migrate one or more date-sharded BigQuery tables into a single partitioned table.
 
@@ -135,13 +123,19 @@ class ShardedToPartitioned:
     use cases where data from multiple providers or pipeline versions must be merged
     into one canonical table.
 
+    **Date range**
+
+    The caller supplies a ``start`` (inclusive) and ``end`` (exclusive) month in
+    ``YYYYMM`` format. The tool iterates over all months in that range and processes
+    each one by querying all source tables with a ``_TABLE_SUFFIX`` filter — one
+    wildcard branch per source table, covering the full calendar month.
+
     **Multiple source tables**
 
-    Any number of source tables can be supplied. For each calendar day the tool
-    discovers which source tables have a shard for that date and issues a
-    ``UNION ALL`` query that writes all of them into a single target partition.
-    Days that appear in more than one source table (e.g. overlapping pipeline
-    versions) are therefore merged, not deduplicated.
+    Any number of source tables can be supplied. For each calendar month the tool
+    issues a ``UNION ALL`` query with one branch per source table, using BigQuery
+    wildcard syntax (``table_*``) filtered by ``_TABLE_SUFFIX``. Days that appear
+    in more than one source table are merged, not deduplicated.
 
     **Schema mismatch handling**
 
@@ -154,18 +148,14 @@ class ShardedToPartitioned:
     **Incremental operation**
 
     By default the tool queries the existing partitions in the target table and
-    skips months that are already fully written. A month is considered pending if
-    any of its days is missing from the target. Pass ``overwrite=True`` to
+    skips months that already have any data written. Pass ``overwrite=True`` to
     re-process and replace already-written months.
 
     **Dry run**
 
-    When ``dry_run=True`` the tool discovers available dates and columns, then
-    logs an example ``UNION ALL`` query for the first available date.  All source
-    tables are included regardless of whether they actually have a shard for that
-    date, so the query shows the full structure. Columns missing from a given
-    source table are filled with ``CAST(NULL AS <type>)`` as they would be in the
-    real run. No data is written and the target table is not created or modified.
+    When ``dry_run=True`` the tool logs an example ``UNION ALL`` query for the
+    first pending month and exits. No data is written and the target table is
+    not created or modified.
 
     **Limitations**
 
@@ -179,7 +169,7 @@ class ShardedToPartitioned:
         target:
             Fully-qualified destination table name (``project.dataset.table``).
 
-        execution_project:
+        project:
             GCP project used to run BigQuery jobs and bear their costs.
 
         schema:
@@ -187,6 +177,12 @@ class ShardedToPartitioned:
             pre-loaded list of :class:`~google.cloud.bigquery.SchemaField` objects.
             Required — used to align columns across sources via ``CAST(NULL AS <type>)``
             for any column absent from a given source table.
+
+        start_date:
+            First month to process, inclusive, in ``YYYYMM`` format.
+
+        end_date:
+            Last month to process, exclusive, in ``YYYYMM`` format.
 
         partition_type:
             Partitioning granularity — one of ``DAY``, ``HOUR``, ``MONTH``, or ``YEAR``.
@@ -207,17 +203,21 @@ class ShardedToPartitioned:
         self,
         tables: list[str],
         target: str,
-        execution_project: str,
+        project: str,
         schema: str | Path | list[bigquery.SchemaField],
+        start_date: str,
+        end_date: str,
         partition_type: str = "DAY",
         partition_field: str = "timestamp",
         bq_client_factory: Callable[[str], bigquery.Client] = bigquery.Client,
     ) -> None:
         self._tables = tables
-        self._execution_project = execution_project
+        self._project = project
         self._client_factory = bq_client_factory
         self._target = target
         self._schema = schema
+        self._start_date = start_date
+        self._end_date = end_date
         self._partition_type = partition_type
         self._partition_field = partition_field
 
@@ -234,7 +234,7 @@ class ShardedToPartitioned:
     @cached_property
     def client(self) -> bigquery.Client:
         """BigQuery client for the execution project."""
-        return self._client_factory(self._execution_project)
+        return self._client_factory(self._project)
 
     @cached_property
     def schema(self) -> list[bigquery.SchemaField]:
@@ -266,11 +266,10 @@ class ShardedToPartitioned:
             LoggerConfig().setup()
 
         logger.info(f"Target: {self.target}")
+        logger.info(f"Date range: {self._start_date} – {self._end_date} (exclusive)")
 
-        logger.info("Discovering available dates…")
-        date_tables = self._discover_dates(self.tables)
-        months = date_tables.group_by_month()
-        logger.info(f"Found {len(date_tables)} dates across {len(months)} months.")
+        months = self._iter_months(self._start_date, self._end_date)
+        logger.info(f"Months in range: {len(months)}")
 
         logger.info("Computing pending months...")
         pending = months
@@ -283,7 +282,7 @@ class ShardedToPartitioned:
 
         logger.info(f"Pending months: {len(pending)}")
         if limit > 0:
-            pending = dict(list(pending.items())[:limit])
+            pending = pending[:limit]
             logger.info(f"Limit applied: processing {len(pending)} month(s).")
 
         if not pending:
@@ -294,9 +293,9 @@ class ShardedToPartitioned:
         table_columns = self._discover_columns(self.tables)
 
         if dry_run:
-            date = next(iter(date_tables))
-            logger.info(f"Example query for {self.target} (showing one shard across all tables):")
-            logger.info(self._build_query(DateTables({date: self.tables}), table_columns))
+            month = pending[0]
+            logger.info(f"Example query for {self.target} ({month}):")
+            logger.info(self._build_query(month, table_columns))
             return
 
         self._ensure_table()
@@ -311,9 +310,9 @@ class ShardedToPartitioned:
             console=_progress_console(),
         ) as progress:
             task = progress.add_task("Migrating...", total=len(pending))
-            for month, dates in pending.items():
+            for month in pending:
                 progress.update(task, description=f"Migrating {month}...")
-                if not self._process_month(month, dates, table_columns, overwrite=overwrite):
+                if not self._process_month(month, table_columns, overwrite=overwrite):
                     failed.append(month)
                 progress.advance(task)
 
@@ -325,35 +324,37 @@ class ShardedToPartitioned:
 
         logger.info("Done.")
 
-    def _discover_dates(self, tables: list[Table]) -> DateTables:
-        date_tables = {}
-        for table in tables:
-            query = _DISCOVER_DATES.render(
-                fq_dataset=table.dataset,
-                table_id=table.table_id,
-                substr_start=len(table.table_id) + 2,
-            )
-            logger.debug(f"Discovering dates for {table}:\n{query}")
-            for row in self.client.query(query).result():
-                date_tables.setdefault(row.date, []).append(table)
+    @staticmethod
+    def _iter_months(start: str, end: str) -> list[str]:
+        """Generate YYYYMM strings from start (inclusive) to end (exclusive)."""
+        def _parse(ym: str) -> date:
+            return datetime.strptime(ym, "%Y%m").date()
 
-        return DateTables(sorted(date_tables.items()))
+        def _next(d: date) -> date:
+            return date(d.year + d.month // 12, d.month % 12 + 1, 1)
 
-    def _compute_pending(self, months: dict[str, DateTables]) -> dict[str, DateTables]:
+        months = []
+        current = _parse(start)
+        stop = _parse(end)
+        while current < stop:
+            months.append(current.strftime("%Y%m"))
+            current = _next(current)
+        return months
+
+    def _compute_pending(self, months: list[str]) -> list[str]:
         project, dataset, table = self.target
         query = _EXISTING_PARTITIONS.render(project=project, dataset=dataset, table=table)
         logger.debug(f"Fetching existing partitions for {self.target}:\n{query}")
         try:
-            existing = {row.partition_id for row in self.client.query(query).result()}
+            existing_months = {
+                row.partition_id[:6]
+                for row in self.client.query(query).result()
+            }
         except NotFound:
             logger.warning(f"Target table {self.target} not found, all months are pending.")
-            existing = set()
+            existing_months = set()
 
-        return {
-            month: dates
-            for month, dates in months.items()
-            if not all(d in existing for d in dates)
-        }
+        return [m for m in months if m not in existing_months]
 
     def _discover_columns(self, tables: list[Table]) -> dict[str, frozenset[str]]:
         result = {}
@@ -376,11 +377,10 @@ class ShardedToPartitioned:
     def _process_month(
         self,
         month: str,
-        dates: DateTables,
         table_columns: dict[str, frozenset[str]],
         overwrite: bool,
     ) -> bool:
-        query = self._build_query(dates, table_columns)
+        query = self._build_query(month, table_columns)
         logger.debug(f"Consolidation query for {self.target} ({month}):\n{query}")
 
         try:
@@ -407,33 +407,37 @@ class ShardedToPartitioned:
 
     def _build_query(
         self,
-        dates: DateTables,
+        month: str,
         table_columns: dict[str, frozenset[str]],
     ) -> str:
+        current = datetime.strptime(month, "%Y%m").date()
+        next_month = date(current.year + current.month // 12, current.month % 12 + 1, 1)
+        start = current.strftime("%Y%m%d")
+        end = next_month.strftime("%Y%m%d")
+
         target_cols = [(f.name, f.field_type) for f in self.schema]
         sources = [
             {
                 "fqn": table.fully_qualified,
-                "date": date,
+                "start": start,
+                "end": end,
                 "cols": [
-                    (
-                        name
-                        if name in table_columns[table.fully_qualified]
-                        else f"CAST(NULL AS {ftype}) AS {name}"
-                    )
+                    name
+                    if name in table_columns[table.fully_qualified]
+                    else f"CAST(NULL AS {ftype}) AS {name}"
                     for name, ftype in target_cols
                 ],
             }
-            for date, tables in sorted(dates.items())
-            for table in tables
+            for table in self.tables
         ]
         return _CONSOLIDATE.render(sources=sources)
 
     def _delete_month(self, month: str) -> None:
+        d = datetime.strptime(month, "%Y%m")
         query = _DELETE_MONTH.render(
             target=self.target,
-            year=month[:4],
-            month=month[4:],
+            year=d.strftime("%Y"),
+            month=d.strftime("%m"),
             partition_field=self._partition_field,
         )
         self.client.query(query).result()
@@ -442,8 +446,10 @@ class ShardedToPartitioned:
 def run(
     bq_in_sharded: list[str],
     bq_out_partitioned: str,
-    execution_project: str,
+    project: str,
     schema_file: str,
+    start_date: str,
+    end_date: str,
     partition_type: str = "DAY",
     partition_field: str = "timestamp",
     overwrite: bool = False,
@@ -457,7 +463,9 @@ def run(
         tables=bq_in_sharded,
         target=bq_out_partitioned,
         schema=schema_file,
-        execution_project=execution_project,
+        project=project,
+        start_date=start_date,
+        end_date=end_date,
         partition_type=partition_type,
         partition_field=partition_field,
         bq_client_factory=bq_client_factory,
