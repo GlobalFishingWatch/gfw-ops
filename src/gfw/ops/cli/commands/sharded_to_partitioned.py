@@ -17,8 +17,8 @@ HELP_BQ_IN_SHARDED = "Fully-qualified source sharded table names (project.datase
 HELP_BQ_OUT_PARTITIONED = "Fully-qualified target partitioned table name (project.dataset.table)."
 HELP_PROJECT = "GCP project used to run BigQuery jobs."
 HELP_SCHEMA_FILE = "Path to a JSON schema file."
-HELP_START_DATE = "First month to process, inclusive (YYYYMM)."
-HELP_END_DATE = "Last month to process, exclusive (YYYYMM)."
+HELP_START_DATE = "First month to process, inclusive (YYYY-MM)."
+HELP_END_DATE = "Last month to process, exclusive (YYYY-MM)."
 HELP_PARTITION_FIELD = "Field to partition the target table on."
 HELP_PARTITION_TYPE = "Partitioning granularity: DAY, HOUR, MONTH or YEAR."
 HELP_OVERWRITE = "Re-process already-written months."
@@ -45,10 +45,10 @@ class ShardedToPartitioned(Command):
         return [
             Option("--bq-in-sharded", type=str, required=True, nargs="+", help=HELP_BQ_IN_SHARDED),
             Option("--bq-out-partitioned", type=str, required=True, help=HELP_BQ_OUT_PARTITIONED),
-            Option("--project", type=str, required=True, help=HELP_PROJECT),
-            Option("--schema-file", type=str, required=True, help=HELP_SCHEMA_FILE),
             Option("--start-date", type=str, required=True, help=HELP_START_DATE),
             Option("--end-date", type=str, required=True, help=HELP_END_DATE),
+            Option("--schema-file", type=str, required=True, help=HELP_SCHEMA_FILE),
+            Option("--project", type=str, required=True, help=HELP_PROJECT),
             Option("--partition-field", type=str, default="timestamp", help=HELP_PARTITION_FIELD),
             Option("--partition-type", type=str, default="DAY", help=HELP_PARTITION_TYPE),
             Option("--overwrite", type=bool, default=False, help=HELP_OVERWRITE),

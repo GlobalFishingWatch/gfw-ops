@@ -126,7 +126,7 @@ class ShardedToPartitioned:
     **Date range**
 
     The caller supplies a ``start`` (inclusive) and ``end`` (exclusive) month in
-    ``YYYYMM`` format. The tool iterates over all months in that range and processes
+    ``YYYY-MM`` format. The tool iterates over all months in that range and processes
     each one by querying all source tables with a ``_TABLE_SUFFIX`` filter — one
     wildcard branch per source table, covering the full calendar month.
 
@@ -179,10 +179,10 @@ class ShardedToPartitioned:
             for any column absent from a given source table.
 
         start_date:
-            First month to process, inclusive, in ``YYYYMM`` format.
+            First month to process, inclusive, in ``YYYY-MM`` format.
 
         end_date:
-            Last month to process, exclusive, in ``YYYYMM`` format.
+            Last month to process, exclusive, in ``YYYY-MM`` format.
 
         partition_type:
             Partitioning granularity — one of ``DAY``, ``HOUR``, ``MONTH``, or ``YEAR``.
@@ -326,9 +326,9 @@ class ShardedToPartitioned:
 
     @staticmethod
     def _iter_months(start: str, end: str) -> list[str]:
-        """Generate YYYYMM strings from start (inclusive) to end (exclusive)."""
+        """Generate YYYY-MM strings from start (inclusive) to end (exclusive)."""
         def _parse(ym: str) -> date:
-            return datetime.strptime(ym, "%Y%m").date()
+            return datetime.strptime(ym, "%Y-%m").date()
 
         def _next(d: date) -> date:
             return date(d.year + d.month // 12, d.month % 12 + 1, 1)
@@ -337,7 +337,7 @@ class ShardedToPartitioned:
         current = _parse(start)
         stop = _parse(end)
         while current < stop:
-            months.append(current.strftime("%Y%m"))
+            months.append(current.strftime("%Y-%m"))
             current = _next(current)
         return months
 
@@ -347,7 +347,7 @@ class ShardedToPartitioned:
         logger.debug(f"Fetching existing partitions for {self.target}:\n{query}")
         try:
             existing_months = {
-                row.partition_id[:6]
+                datetime.strptime(row.partition_id, "%Y%m%d").strftime("%Y-%m")
                 for row in self.client.query(query).result()
             }
         except NotFound:
@@ -410,7 +410,7 @@ class ShardedToPartitioned:
         month: str,
         table_columns: dict[str, frozenset[str]],
     ) -> str:
-        current = datetime.strptime(month, "%Y%m").date()
+        current = datetime.strptime(month, "%Y-%m").date()
         next_month = date(current.year + current.month // 12, current.month % 12 + 1, 1)
         start = current.strftime("%Y%m%d")
         end = next_month.strftime("%Y%m%d")
@@ -433,7 +433,7 @@ class ShardedToPartitioned:
         return _CONSOLIDATE.render(sources=sources)
 
     def _delete_month(self, month: str) -> None:
-        d = datetime.strptime(month, "%Y%m")
+        d = datetime.strptime(month, "%Y-%m")
         query = _DELETE_MONTH.render(
             target=self.target,
             year=d.strftime("%Y"),

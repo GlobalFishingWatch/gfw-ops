@@ -19,15 +19,15 @@ _BASE_ARGS = [
     "--schema-file",
     "schema.json",
     "--start-date",
-    "202301",
+    "2023-01",
     "--end-date",
-    "202302",
+    "2023-02",
 ]
 
 
 def test_run_no_pending():
     # Empty range (start == end) → no months to process, no BQ calls needed.
-    args = [*_BASE_ARGS[:-1], "202301"]  # override --end to match --start
+    args = [*_BASE_ARGS[:-1], "2023-01"]  # override --end to match --start
     cli = CLI(subcommands=[ShardedToPartitioned])
     cli.execute(args, bq_client_factory=BigQueryHelper.get_client_factory(mocked=True))
 

@@ -6,10 +6,10 @@ bq_in_sharded:
 bq_out_partitioned: world-fishing-827.pipe_ais_sources_v20220628.normalized_consolidated
 project: world-fishing-827
 schema_file: ./examples/assets/normalize-schema.json
-start_date: "2012-01"
-end_date: "2026-04"
+start_date: "2022-12"
+end_date: "2023-01"
 partition_field: timestamp
 partition_type: DAY
-overwrite: false
+overwrite: true
 dry_run: false
-limit: 0
+limit: 1
