@@ -1,0 +1,15 @@
+bq_in_sharded:
+  - world-fishing-827.pipe_ais_sources_v20220628.normalized_orbcomm
+  - world-fishing-827.pipe_ais_sources_v20220628.normalized_spire
+  - world-fishing-827.pipe_ais_sources_v20220628.pipe_nmea_normalized
+  - world-fishing-827.pipe_ais_sources_v20220628.pipe_nmea_marinetraffic_normalized
+bq_out_partitioned: world-fishing-827.pipe_ais_sources_v20220628.normalized_consolidated
+project: world-fishing-827
+schema_file: ./examples/assets/normalize-schema.json
+start_date: "2022-12"
+end_date: "2023-01"
+partition_field: timestamp
+partition_type: DAY
+overwrite: true
+dry_run: false
+limit: 1

@@ -5,7 +5,7 @@
     <img src="https://github.com/GlobalFishingWatch/gfw-ops/actions/workflows/main.yaml/badge.svg"/>
   </a>
   <a href="https://codecov.io/gh/GlobalFishingWatch/gfw-ops" >
-    <img src="https://codecov.io/gh/GlobalFishingWatch/gfw-ops/graph/badge.svg?token=uZTb6EphP8"/>
+    <img src="https://codecov.io/gh/GlobalFishingWatch/gfw-ops/graph/badge.svg?token=B4EHNI359E"/>
   </a>
   <a>
     <img alt="Python versions" src="https://img.shields.io/badge/python-3.13%20%7C%203.14-blue">
