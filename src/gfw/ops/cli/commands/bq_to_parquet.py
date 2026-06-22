@@ -11,10 +11,12 @@ from gfw.ops.pipelines import bq_to_parquet as pipeline
 
 _DESCRIPTION = "Exports data from a BigQuery table to hive-partitioned Parquet files on GCS."
 
+HELP_PROJECT = "GCP project for billing and schema fetching."
 HELP_BQ_IN = "Fully-qualified source BigQuery table (project.dataset.table)."
 HELP_GCS_OUT = "GCS output path prefix (gs://bucket/path)."
 HELP_SCHEMA_FILE = "Path to a BigQuery JSON schema. If None, the schema is fetched from the table."
-HELP_DATE_RANGE = "Start and end date to export (YYYY-MM-DD YYYY-MM-DD)."
+HELP_START_DATE = "Start date to export, inclusive (YYYY-MM-DD)."
+HELP_END_DATE = "End date to export, exclusive (YYYY-MM-DD)."
 HELP_TIMESTAMP_FIELD = "Field used for windowing and date filtering."
 HELP_PARTITION_FIELDS = "Extra hive partition dimensions (field names from the row)."
 HELP_PARTITION_TIME = "Time partition granularity: hour or day."
@@ -42,12 +44,15 @@ class BqToParquet(Command):
     def options(self) -> list[Option]:
         """Command options."""
         return [
+            Option("--project", type=str, required=True, help=HELP_PROJECT),
             Option("--bq-in", type=str, required=True, help=HELP_BQ_IN),
             Option("--gcs-out", type=str, required=True, help=HELP_GCS_OUT),
             Option("--schema-file", type=str, required=False, help=HELP_SCHEMA_FILE),
-            Option("--date-range", type=str, nargs=2, required=True, help=HELP_DATE_RANGE),
+            Option("--start-date", type=str, required=True, help=HELP_START_DATE),
+            Option("--end-date", type=str, required=True, help=HELP_END_DATE),
             Option("--timestamp-field", type=str, default="timestamp", help=HELP_TIMESTAMP_FIELD),
-            Option("--partition-fields", type=str, nargs="*", help=HELP_PARTITION_FIELDS),
+            Option("--partition-fields", type=str, nargs="*", default=(),
+                   help=HELP_PARTITION_FIELDS),
             Option("--partition-time", type=str, default="hour", help=HELP_PARTITION_TIME),
             Option("--partition-prefix", type=str, default="event_", help=HELP_PARTITION_PREFIX),
             Option("--gcs-window-size", type=int, default=3600, help=HELP_GCS_WINDOW_SIZE),

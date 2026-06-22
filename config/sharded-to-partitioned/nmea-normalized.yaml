@@ -3,7 +3,7 @@ bq_in_sharded:
   - world-fishing-827.pipe_ais_sources_v20220628.normalized_spire
   - world-fishing-827.pipe_ais_sources_v20220628.pipe_nmea_normalized
   - world-fishing-827.pipe_ais_sources_v20220628.pipe_nmea_marinetraffic_normalized
-bq_out_partitioned: world-fishing-827.pipe_ais_sources_v20220628.normalized_consolidated
+bq_out_partitioned: gfw-int-ais-datalake.vessel_transmissions_normalized_v1.messages_old_up_to_2026-04
 project: world-fishing-827
 schema_file: ./examples/assets/normalize-schema.json
 start_date: "2012-01-01"

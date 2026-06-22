@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any, Callable
 
 import apache_beam as beam
@@ -20,11 +21,11 @@ from gfw.ops.version import __version__
 logger = logging.getLogger(__name__)
 
 
-def _build_query(bq_in: str, date_range: tuple[str, str], timestamp_field: str) -> str:
-    start, end = date_range
+def _build_query(bq_in: str, start_date: str, end_date: str, timestamp_field: str) -> str:
     return (
         f"SELECT * FROM `{bq_in}` "
-        f"WHERE DATE({timestamp_field}) BETWEEN '{start}' AND '{end}'"
+        f"WHERE DATE({timestamp_field}) >= '{start_date}'"
+        f" AND DATE({timestamp_field}) < '{end_date}'"
     )
 
 
@@ -38,11 +39,13 @@ def _assign_timestamp(timestamp_field: str) -> Callable[[dict], beam.window.Time
 def run(
     bq_in: str,
     gcs_out: str,
-    date_range: tuple[str, str],
+    start_date: str,
+    end_date: str,
+    project: str,
     schema_file: str | None = None,
     timestamp_field: str = "timestamp",
-    partition_fields: list[str] | None = None,
-    partition_time_granularity: str = "hour",
+    partition_fields: Sequence[str] = (),
+    partition_time: str = "hour",
     partition_prefix: str = "event_",
     gcs_window_size: int = 3600,
     gcs_num_shards: int = 6,
@@ -62,8 +65,14 @@ def run(
         gcs_out:
             GCS output path prefix (gs://bucket/path).
 
-        date_range:
-            Start and end date as (YYYY-MM-DD, YYYY-MM-DD).
+        start_date:
+            Start date, inclusive (YYYY-MM-DD).
+
+        end_date:
+            End date, exclusive (YYYY-MM-DD).
+
+        project:
+            GCP project for schema fetching and Beam pipeline options.
 
         schema_file:
             Path to a BigQuery JSON schema file. If ``None``, the schema is
@@ -109,20 +118,20 @@ def run(
         **kwargs:
             Additional keyword args forwarded to Beam PipelineOptions.
     """
-    query = _build_query(bq_in, date_range, timestamp_field)
+    query = _build_query(bq_in, start_date, end_date, timestamp_field)
 
-    logger.info(f"Exporting {bq_in} for date range {date_range} to {gcs_out}")
+    logger.info(f"Exporting {bq_in} for [{start_date}, {end_date}) to {gcs_out}")
     logger.info(f"Query:\n{query}")
 
     if schema_file is not None:
         schema = Schema.from_json(schema_file).as_pyarrow()
     else:
-        schema = BigQueryHelper(project=kwargs.get("project")).fetch_schema(bq_in).as_pyarrow()
+        schema = BigQueryHelper(project=project).fetch_schema(bq_in).as_pyarrow()
 
     partition = HivePartitionConfig(
-        fields={f: lambda x: x for f in (partition_fields or [])},
+        fields={f: lambda x: x for f in partition_fields},
         prefix=partition_prefix,
-        time_granularity=partition_time_granularity,
+        time_granularity=partition_time,
     )
 
     dag = LinearDag(
@@ -154,6 +163,7 @@ def run(
         version=__version__,
         dag=dag,
         unparsed_args=unknown_unparsed_args,
+        project=project,
         **beam_options,
     )
 

@@ -17,13 +17,14 @@ from gfw.ops.pipelines.bq_to_parquet.main import (
 
 
 def test_build_query_contains_table_and_dates():
-    q = _build_query("proj.ds.table", ("2024-01-01", "2024-01-31"), "timestamp")
+    q = _build_query("proj.ds.table", "2024-01-01", "2024-02-01", "timestamp")
     assert "proj.ds.table" in q
-    assert "BETWEEN '2024-01-01' AND '2024-01-31'" in q
+    assert "DATE(timestamp) >= '2024-01-01'" in q
+    assert "DATE(timestamp) < '2024-02-01'" in q
 
 
 def test_build_query_uses_timestamp_field():
-    q = _build_query("proj.ds.table", ("2024-06-01", "2024-06-30"), "event_time")
+    q = _build_query("proj.ds.table", "2024-06-01", "2024-07-01", "event_time")
     assert "DATE(event_time)" in q
 
 
@@ -45,8 +46,10 @@ def test_dry_run_returns_pipeline(tmp_path):
     result = run(
         bq_in="proj.ds.table",
         gcs_out="gs://bucket/path",
+        project="proj",
         schema_file=str(schema_file),
-        date_range=("2024-01-01", "2024-01-31"),
+        start_date="2024-01-01",
+        end_date="2024-02-01",
         dry_run=True,
     )
     assert isinstance(result, Pipeline)
@@ -69,8 +72,10 @@ def test_run_pipeline(tmp_path):
     pipeline = run(
         bq_in="proj.ds.table",
         gcs_out=str(tmp_path / "out"),
+        project="proj",
         schema_file=str(schema_file),
-        date_range=("2024-01-01", "2024-01-31"),
+        start_date="2024-01-01",
+        end_date="2024-02-01",
         read_from_bigquery_factory=lambda **kwargs: FakeReadFromBigQuery(elements=rows),
         parquet_sink_factory=FakeParquetSink,
         dry_run=True,
