@@ -14,8 +14,8 @@ def _make_stp(schema=None):
         target="proj.ds.target",
         project="proj",
         schema=schema or [],
-        start_date="2023-01",
-        end_date="2023-03",
+        start_date="2023-01-01",
+        end_date="2023-03-01",
         bq_client_factory=MagicMock(),
     )
 
@@ -46,7 +46,7 @@ def test_table_unpack():
 
 
 def test_iter_months():
-    assert ShardedToPartitioned._iter_months("2023-01", "2023-04") == [
+    assert ShardedToPartitioned._iter_months("2023-01-01", "2023-04-01") == [
         "2023-01",
         "2023-02",
         "2023-03",
@@ -54,7 +54,7 @@ def test_iter_months():
 
 
 def test_iter_months_year_boundary():
-    assert ShardedToPartitioned._iter_months("2022-11", "2023-02") == [
+    assert ShardedToPartitioned._iter_months("2022-11-01", "2023-02-01") == [
         "2022-11",
         "2022-12",
         "2023-01",
@@ -62,7 +62,22 @@ def test_iter_months_year_boundary():
 
 
 def test_iter_months_empty_when_start_equals_end():
-    assert ShardedToPartitioned._iter_months("2023-01", "2023-01") == []
+    assert ShardedToPartitioned._iter_months("2023-01-01", "2023-01-01") == []
+
+
+def test_iter_months_partial_start_includes_that_month():
+    assert ShardedToPartitioned._iter_months("2023-01-15", "2023-03-01") == [
+        "2023-01",
+        "2023-02",
+    ]
+
+
+def test_iter_months_partial_end_includes_that_month():
+    assert ShardedToPartitioned._iter_months("2023-01-01", "2023-03-15") == [
+        "2023-01",
+        "2023-02",
+        "2023-03",
+    ]
 
 
 # --- ShardedToPartitioned._build_query ---
@@ -103,12 +118,52 @@ def test_build_query_null_cast_for_missing_column():
 
 def test_build_query_december_wraps_year():
     schema = [bigquery.SchemaField("ts", "TIMESTAMP")]
-    stp = _make_stp(schema=schema)
+    stp = ShardedToPartitioned(
+        tables=["proj.ds.table_a", "proj.ds.table_b"],
+        target="proj.ds.target",
+        project="proj",
+        schema=schema,
+        start_date="2022-12-01",
+        end_date="2023-01-01",
+        bq_client_factory=MagicMock(),
+    )
     table_columns = {"proj.ds.table_a": frozenset(["ts"]), "proj.ds.table_b": frozenset(["ts"])}
 
     query = stp._build_query("2022-12", table_columns)
 
     assert "_TABLE_SUFFIX >= '20221201' AND _TABLE_SUFFIX < '20230101'" in query
+
+
+def test_build_query_clamps_suffix_to_start_date():
+    schema = [bigquery.SchemaField("ts", "TIMESTAMP")]
+    stp = ShardedToPartitioned(
+        tables=["proj.ds.table_a"],
+        target="proj.ds.target",
+        project="proj",
+        schema=schema,
+        start_date="2023-01-15",
+        end_date="2023-02-01",
+        bq_client_factory=MagicMock(),
+    )
+    query = stp._build_query("2023-01", {"proj.ds.table_a": frozenset(["ts"])})
+    assert "_TABLE_SUFFIX >= '20230115'" in query
+    assert "_TABLE_SUFFIX < '20230201'" in query
+
+
+def test_build_query_clamps_suffix_to_end_date():
+    schema = [bigquery.SchemaField("ts", "TIMESTAMP")]
+    stp = ShardedToPartitioned(
+        tables=["proj.ds.table_a"],
+        target="proj.ds.target",
+        project="proj",
+        schema=schema,
+        start_date="2023-01-01",
+        end_date="2023-01-22",
+        bq_client_factory=MagicMock(),
+    )
+    query = stp._build_query("2023-01", {"proj.ds.table_a": frozenset(["ts"])})
+    assert "_TABLE_SUFFIX >= '20230101'" in query
+    assert "_TABLE_SUFFIX < '20230122'" in query
 
 
 # --- ShardedToPartitioned properties ---
@@ -121,8 +176,8 @@ def test_schema_from_list():
         target="proj.ds.target",
         project="proj",
         schema=schema,
-        start_date="2023-01",
-        end_date="2023-02",
+        start_date="2023-01-01",
+        end_date="2023-02-01",
         bq_client_factory=MagicMock(),
     )
     assert stp.schema == schema
@@ -131,6 +186,21 @@ def test_schema_from_list():
 def test_partition_type():
     stp = _make_stp()
     assert stp.partition_type == bigquery.TimePartitioningType.DAY
+
+
+def test_partition_type_invalid_raises():
+    stp = ShardedToPartitioned(
+        tables=["proj.ds.t"],
+        target="proj.ds.target",
+        project="proj",
+        schema=[],
+        start_date="2023-01-01",
+        end_date="2023-02-01",
+        partition_type="WEEK",
+        bq_client_factory=MagicMock(),
+    )
+    with pytest.raises(ValueError, match="Invalid partition_type"):
+        _ = stp.partition_type
 
 
 # --- ShardedToPartitioned._ensure_table ---
@@ -202,6 +272,46 @@ def test_process_month_google_api_error_returns_false():
     stp.client.query.return_value.result.side_effect = GoogleAPIError("BQ error")
 
     assert stp._process_month("2023-01", table_columns, overwrite=False) is False
+
+
+def test_run_overwrite_skips_compute_pending():
+    stp = _make_stp()
+
+    with (
+        patch.object(stp, "_compute_pending") as mock_pending,
+        patch.object(stp, "_discover_columns", return_value={}),
+        patch.object(stp, "_ensure_table"),
+        patch.object(stp, "_process_month", return_value=True),
+    ):
+        stp.run(overwrite=True)
+
+    mock_pending.assert_not_called()
+
+
+def test_run_limit_caps_months_processed():
+    stp = _make_stp()
+
+    with (
+        patch.object(stp, "_compute_pending", return_value=["2023-01", "2023-02"]),
+        patch.object(stp, "_discover_columns", return_value={}),
+        patch.object(stp, "_ensure_table"),
+        patch.object(stp, "_process_month", return_value=True) as mock_pm,
+    ):
+        stp.run(limit=1)
+
+    assert mock_pm.call_count == 1
+
+
+def test_run_logs_skipped_months():
+    stp = _make_stp()
+
+    with (
+        patch.object(stp, "_compute_pending", return_value=["2023-02"]),
+        patch.object(stp, "_discover_columns", return_value={}),
+        patch.object(stp, "_ensure_table"),
+        patch.object(stp, "_process_month", return_value=True),
+    ):
+        stp.run()  # 2 months in range, 1 pending → 1 skipped
 
 
 def test_run_raises_after_all_months_attempted_when_some_fail():
