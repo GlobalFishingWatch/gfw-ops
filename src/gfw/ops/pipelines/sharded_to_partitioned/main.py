@@ -56,6 +56,10 @@ CAVEAT = (
 )
 
 
+def _as_shard(d: date) -> str:
+    return d.strftime("%Y%m%d")
+
+
 def _progress_console() -> Console:
     h = next((h for h in logging.root.handlers if isinstance(h, RichHandler)), None)
     return h.console if h else Console()
@@ -78,6 +82,36 @@ _PARTITION_TYPE_MAP = {
     "MONTH": bigquery.TimePartitioningType.MONTH,
     "YEAR": bigquery.TimePartitioningType.YEAR,
 }
+
+
+@dataclass(frozen=True)
+class Month:
+    """A calendar month with arithmetic and string support."""
+
+    year: int
+    month: int
+
+    def __str__(self) -> str:
+        return f"{self.year:04d}-{self.month:02d}"
+
+    def next(self) -> Month:
+        """Return the following month."""
+        return Month(self.year + self.month // 12, self.month % 12 + 1)
+
+    @property
+    def start(self) -> date:
+        """First day of this month."""
+        return date(self.year, self.month, 1)
+
+    @classmethod
+    def from_date(cls, d: date) -> Month:
+        """Construct from a date, truncating to the month."""
+        return cls(d.year, d.month)
+
+    @classmethod
+    def from_partition_id(cls, partition_id: str) -> Month:
+        """Construct from a BigQuery YYYYMMDD partition_id string."""
+        return cls.from_date(datetime.strptime(partition_id, "%Y%m%d").date())
 
 
 @dataclass(frozen=True)
@@ -243,6 +277,16 @@ class ShardedToPartitioned:
         return self.client.schema_from_json(str(self._schema))
 
     @cached_property
+    def start_date(self) -> date:
+        """Start date parsed from the ``start_date`` string."""
+        return date.fromisoformat(self._start_date)
+
+    @cached_property
+    def end_date(self) -> date:
+        """End date parsed from the ``end_date`` string."""
+        return date.fromisoformat(self._end_date)
+
+    @cached_property
     def partition_type(self) -> str:
         """Partition type resolved from string (DAY, HOUR, MONTH, YEAR)."""
         if self._partition_type not in _PARTITION_TYPE_MAP:
@@ -267,16 +311,14 @@ class ShardedToPartitioned:
         """
         logger.info(f"Target: {self.target}")
         logger.info(f"Date range: {self._start_date} – {self._end_date} (exclusive)")
-
-        months = self._iter_months(self._start_date, self._end_date)
-        logger.info(f"Months in range: {len(months)}")
+        logger.info(f"Months in range: {len(self.months)}")
 
         logger.info("Computing pending months...")
-        pending = months
+        pending = self.months
         if not overwrite:
-            pending = self._compute_pending(months)
+            pending = self._compute_pending()
 
-        skipped = len(months) - len(pending)
+        skipped = len(self.months) - len(pending)
         if skipped:
             logger.info(f"Skipping {skipped} already-written months (use overwrite=True to redo).")
 
@@ -317,43 +359,37 @@ class ShardedToPartitioned:
                 progress.advance(task)
 
         if failed:
-            logger.error(f"{len(failed)} month(s) failed: {', '.join(failed)}")
+            failed_str = [str(m) for m in failed]
+            logger.error(f"{len(failed)} month(s) failed: {', '.join(failed_str)}")
             raise RuntimeError(
-                f"Migration completed with {len(failed)} failed month(s): {failed}"
+                f"Migration completed with {len(failed)} failed month(s): {failed_str}"
             )
 
         logger.info("Done.")
 
-    @staticmethod
-    def _iter_months(start: str, end: str) -> list[str]:
-        """Generate YYYY-MM strings for all months touched by [start, end)."""
-        def _next(d: date) -> date:
-            return date(d.year + d.month // 12, d.month % 12 + 1, 1)
-
-        start_date = date.fromisoformat(start)
-        end_date = date.fromisoformat(end)
+    @cached_property
+    def months(self) -> list[Month]:
+        """All months touched by [start_date, end_date)."""
         months = []
-        current = date(start_date.year, start_date.month, 1)
-        while current < end_date:
-            months.append(current.strftime("%Y-%m"))
-            current = _next(current)
-
+        current = Month.from_date(self.start_date)
+        while current.start < self.end_date:
+            months.append(current)
+            current = current.next()
         return months
 
-    def _compute_pending(self, months: list[str]) -> list[str]:
+    def _compute_pending(self) -> list[Month]:
         project, dataset, table = self.target
         query = _EXISTING_PARTITIONS.render(project=project, dataset=dataset, table=table)
         logger.debug(f"Fetching existing partitions for {self.target}:\n{query}")
+
         try:
-            existing_months = {
-                datetime.strptime(row.partition_id, "%Y%m%d").strftime("%Y-%m")
-                for row in self.client.query(query).result()
-            }
+            rows = list(self.client.query(query).result())
         except NotFound:
             logger.warning(f"Target table {self.target} not found, all months are pending.")
-            existing_months = set()
+            return self.months
 
-        return [m for m in months if m not in existing_months]
+        existing_months = {Month.from_partition_id(row.partition_id) for row in rows}
+        return [m for m in self.months if m not in existing_months]
 
     def _discover_columns(self, tables: list[Table]) -> dict[str, frozenset[str]]:
         result = {}
@@ -375,7 +411,7 @@ class ShardedToPartitioned:
 
     def _process_month(
         self,
-        month: str,
+        month: Month,
         table_columns: dict[str, frozenset[str]],
         overwrite: bool,
     ) -> bool:
@@ -406,15 +442,11 @@ class ShardedToPartitioned:
 
     def _build_query(
         self,
-        month: str,
+        month: Month,
         table_columns: dict[str, frozenset[str]],
     ) -> str:
-        start_date = date.fromisoformat(self._start_date)
-        end_date = date.fromisoformat(self._end_date)
-        month_start = date.fromisoformat(f"{month}-01")
-        month_end = date(month_start.year + month_start.month // 12, month_start.month % 12 + 1, 1)
-        start = max(month_start, start_date).strftime("%Y%m%d")
-        end = min(month_end, end_date).strftime("%Y%m%d")
+        start = _as_shard(max(month.start, self.start_date))
+        end = _as_shard(min(month.next().start, self.end_date))
 
         target_cols = [(f.name, f.field_type) for f in self.schema]
         sources = [
@@ -433,12 +465,11 @@ class ShardedToPartitioned:
         ]
         return _CONSOLIDATE.render(sources=sources)
 
-    def _delete_month(self, month: str) -> None:
-        d = datetime.strptime(month, "%Y-%m")
+    def _delete_month(self, month: Month) -> None:
         query = _DELETE_MONTH.render(
             target=self.target,
-            year=d.strftime("%Y"),
-            month=d.strftime("%m"),
+            year=month.year,
+            month=month.month,
             partition_field=self._partition_field,
         )
         self.client.query(query).result()

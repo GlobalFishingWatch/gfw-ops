@@ -5,7 +5,7 @@ import pytest
 from google.api_core.exceptions import GoogleAPIError, NotFound
 from google.cloud import bigquery
 
-from gfw.ops.pipelines.sharded_to_partitioned.main import ShardedToPartitioned, Table
+from gfw.ops.pipelines.sharded_to_partitioned.main import Month, ShardedToPartitioned, Table
 
 
 def _make_stp(schema=None):
@@ -42,41 +42,48 @@ def test_table_unpack():
     assert (project, dataset, table) == ("p", "d", "t")
 
 
-# --- ShardedToPartitioned._iter_months ---
+# --- Month ---
+
+
+def test_month_from_partition_id():
+    assert Month.from_partition_id("20230115") == Month(2023, 1)
+
+
+# --- ShardedToPartitioned.months ---
+
+
+def _stp_with_dates(start, end):
+    return ShardedToPartitioned(
+        tables=["proj.ds.t"], target="proj.ds.target", project="proj",
+        schema=[], start_date=start, end_date=end, bq_client_factory=MagicMock(),
+    )
 
 
 def test_iter_months():
-    assert ShardedToPartitioned._iter_months("2023-01-01", "2023-04-01") == [
-        "2023-01",
-        "2023-02",
-        "2023-03",
+    assert _stp_with_dates("2023-01-01", "2023-04-01").months == [
+        Month(2023, 1), Month(2023, 2), Month(2023, 3),
     ]
 
 
 def test_iter_months_year_boundary():
-    assert ShardedToPartitioned._iter_months("2022-11-01", "2023-02-01") == [
-        "2022-11",
-        "2022-12",
-        "2023-01",
+    assert _stp_with_dates("2022-11-01", "2023-02-01").months == [
+        Month(2022, 11), Month(2022, 12), Month(2023, 1),
     ]
 
 
 def test_iter_months_empty_when_start_equals_end():
-    assert ShardedToPartitioned._iter_months("2023-01-01", "2023-01-01") == []
+    assert _stp_with_dates("2023-01-01", "2023-01-01").months == []
 
 
 def test_iter_months_partial_start_includes_that_month():
-    assert ShardedToPartitioned._iter_months("2023-01-15", "2023-03-01") == [
-        "2023-01",
-        "2023-02",
+    assert _stp_with_dates("2023-01-15", "2023-03-01").months == [
+        Month(2023, 1), Month(2023, 2),
     ]
 
 
 def test_iter_months_partial_end_includes_that_month():
-    assert ShardedToPartitioned._iter_months("2023-01-01", "2023-03-15") == [
-        "2023-01",
-        "2023-02",
-        "2023-03",
+    assert _stp_with_dates("2023-01-01", "2023-03-15").months == [
+        Month(2023, 1), Month(2023, 2), Month(2023, 3),
     ]
 
 
@@ -91,7 +98,7 @@ def test_build_query_includes_all_tables_for_month():
         "proj.ds.table_b": frozenset(["ts"]),
     }
 
-    query = stp._build_query("2023-01", table_columns)
+    query = stp._build_query(Month(2023, 1), table_columns)
 
     assert "proj.ds.table_a_*" in query
     assert "proj.ds.table_b_*" in query
@@ -110,7 +117,7 @@ def test_build_query_null_cast_for_missing_column():
         "proj.ds.table_b": frozenset(["ts"]),  # missing "msg"
     }
 
-    query = stp._build_query("2023-01", table_columns)
+    query = stp._build_query(Month(2023, 1), table_columns)
 
     # only table_b is missing "msg", so exactly one NULL cast should appear
     assert query.count("CAST(NULL AS STRING) AS msg") == 1
@@ -129,7 +136,7 @@ def test_build_query_december_wraps_year():
     )
     table_columns = {"proj.ds.table_a": frozenset(["ts"]), "proj.ds.table_b": frozenset(["ts"])}
 
-    query = stp._build_query("2022-12", table_columns)
+    query = stp._build_query(Month(2022, 12), table_columns)
 
     assert "_TABLE_SUFFIX >= '20221201' AND _TABLE_SUFFIX < '20230101'" in query
 
@@ -145,7 +152,7 @@ def test_build_query_clamps_suffix_to_start_date():
         end_date="2023-02-01",
         bq_client_factory=MagicMock(),
     )
-    query = stp._build_query("2023-01", {"proj.ds.table_a": frozenset(["ts"])})
+    query = stp._build_query(Month(2023, 1), {"proj.ds.table_a": frozenset(["ts"])})
     assert "_TABLE_SUFFIX >= '20230115'" in query
     assert "_TABLE_SUFFIX < '20230201'" in query
 
@@ -161,7 +168,7 @@ def test_build_query_clamps_suffix_to_end_date():
         end_date="2023-01-22",
         bq_client_factory=MagicMock(),
     )
-    query = stp._build_query("2023-01", {"proj.ds.table_a": frozenset(["ts"])})
+    query = stp._build_query(Month(2023, 1), {"proj.ds.table_a": frozenset(["ts"])})
     assert "_TABLE_SUFFIX >= '20230101'" in query
     assert "_TABLE_SUFFIX < '20230122'" in query
 
@@ -220,11 +227,10 @@ def test_ensure_table():
 def test_compute_pending_not_found_returns_all_months():
     stp = _make_stp()
     stp.client.query.side_effect = NotFound("table not found")
-    months = ["2023-01", "2023-02"]
 
-    result = stp._compute_pending(months)
+    result = stp._compute_pending()
 
-    assert result == months
+    assert result == stp.months
 
 
 def test_compute_pending_skips_existing_months():
@@ -233,11 +239,10 @@ def test_compute_pending_skips_existing_months():
         type("Row", (), {"partition_id": "20230101"})(),
         type("Row", (), {"partition_id": "20230115"})(),
     ]
-    months = ["2023-01", "2023-02"]
 
-    result = stp._compute_pending(months)
+    result = stp._compute_pending()
 
-    assert result == ["2023-02"]
+    assert result == [Month(2023, 2)]
 
 
 # --- ShardedToPartitioned._process_month ---
@@ -249,7 +254,7 @@ def test_process_month():
     table_columns = {"proj.ds.table_a": frozenset(["ts"]), "proj.ds.table_b": frozenset(["ts"])}
     stp.client.query.return_value.total_bytes_processed = 0
 
-    stp._process_month("2023-01", table_columns, overwrite=False)
+    stp._process_month(Month(2023, 1), table_columns, overwrite=False)
 
     stp.client.query.assert_called_once()
 
@@ -260,7 +265,7 @@ def test_process_month_overwrite_deletes_first():
     table_columns = {"proj.ds.table_a": frozenset(["ts"]), "proj.ds.table_b": frozenset(["ts"])}
     stp.client.query.return_value.total_bytes_processed = 0
 
-    stp._process_month("2023-01", table_columns, overwrite=True)
+    stp._process_month(Month(2023, 1), table_columns, overwrite=True)
 
     assert stp.client.query.call_count == 2  # delete + insert
 
@@ -271,7 +276,7 @@ def test_process_month_google_api_error_returns_false():
     table_columns = {"proj.ds.table_a": frozenset(["ts"]), "proj.ds.table_b": frozenset(["ts"])}
     stp.client.query.return_value.result.side_effect = GoogleAPIError("BQ error")
 
-    assert stp._process_month("2023-01", table_columns, overwrite=False) is False
+    assert stp._process_month(Month(2023, 1), table_columns, overwrite=False) is False
 
 
 def test_run_overwrite_skips_compute_pending():
@@ -292,7 +297,7 @@ def test_run_limit_caps_months_processed():
     stp = _make_stp()
 
     with (
-        patch.object(stp, "_compute_pending", return_value=["2023-01", "2023-02"]),
+        patch.object(stp, "_compute_pending", return_value=[Month(2023, 1), Month(2023, 2)]),
         patch.object(stp, "_discover_columns", return_value={}),
         patch.object(stp, "_ensure_table"),
         patch.object(stp, "_process_month", return_value=True) as mock_pm,
@@ -306,7 +311,7 @@ def test_run_logs_skipped_months():
     stp = _make_stp()
 
     with (
-        patch.object(stp, "_compute_pending", return_value=["2023-02"]),
+        patch.object(stp, "_compute_pending", return_value=[Month(2023, 2)]),
         patch.object(stp, "_discover_columns", return_value={}),
         patch.object(stp, "_ensure_table"),
         patch.object(stp, "_process_month", return_value=True),
@@ -319,7 +324,7 @@ def test_run_raises_after_all_months_attempted_when_some_fail():
     stp = _make_stp(schema=schema)
 
     with (
-        patch.object(stp, "_compute_pending", return_value=["2023-01", "2023-02"]),
+        patch.object(stp, "_compute_pending", return_value=[Month(2023, 1), Month(2023, 2)]),
         patch.object(stp, "_discover_columns", return_value={}),
         patch.object(stp, "_ensure_table"),
         patch.object(stp, "_process_month", return_value=False) as mock_pm,
