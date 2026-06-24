@@ -18,11 +18,11 @@ HELP_SCHEMA_FILE = "Path to a BigQuery JSON schema. If None, the schema is fetch
 HELP_START_DATE = "Start date to export, inclusive (YYYY-MM-DD)."
 HELP_END_DATE = "End date to export, exclusive (YYYY-MM-DD)."
 HELP_TIMESTAMP_FIELD = "Field used for windowing and date filtering."
-HELP_PARTITION_FIELDS = "Extra hive partition dimensions (field names from the row)."
-HELP_PARTITION_TIME = "Time partition granularity: hour or day."
-HELP_PARTITION_PREFIX = "Prefix applied to every partition key name in the output path."
-HELP_GCS_WINDOW_SIZE = "Beam window size in seconds."
-HELP_GCS_NUM_SHARDS = "Number of output files per partition per window."
+HELP_PART_FIELDS = "Extra hive partition dimensions (field names from the row)."
+HELP_PART_TIME = "Time partition granularity: hour or day."
+HELP_PART_PREFIX = "Prefix applied to every partition key name in the output path."
+HELP_WINDOW_SIZE = "Beam window size in seconds."
+HELP_NUM_SHARDS = "Number of output files per partition per window."
 HELP_RUNNER = "Beam runner: DirectRunner or DataflowRunner."
 HELP_DRY_RUN = "Log the query and exit without writing."
 
@@ -51,12 +51,11 @@ class BqToParquet(Command):
             Option("--start-date", type=str, required=True, help=HELP_START_DATE),
             Option("--end-date", type=str, required=True, help=HELP_END_DATE),
             Option("--timestamp-field", type=str, default="timestamp", help=HELP_TIMESTAMP_FIELD),
-            Option("--partition-fields", type=str, nargs="*", default=(),
-                   help=HELP_PARTITION_FIELDS),
-            Option("--partition-time", type=str, default="hour", help=HELP_PARTITION_TIME),
-            Option("--partition-prefix", type=str, default="event_", help=HELP_PARTITION_PREFIX),
-            Option("--gcs-window-size", type=int, default=3600, help=HELP_GCS_WINDOW_SIZE),
-            Option("--gcs-num-shards", type=int, default=6, help=HELP_GCS_NUM_SHARDS),
+            Option("--partition-fields", type=str, nargs="*", default=(), help=HELP_PART_FIELDS),
+            Option("--partition-time", type=str, default="hour", help=HELP_PART_TIME),
+            Option("--partition-prefix", type=str, default="event_", help=HELP_PART_PREFIX),
+            Option("--window-size", type=int, default=3600, help=HELP_WINDOW_SIZE),
+            Option("--num-shards", type=int, default=6, help=HELP_NUM_SHARDS),
             Option("--runner", type=str, default="DataflowRunner", help=HELP_RUNNER),
             Option("--dry-run", type=bool, default=False, help=HELP_DRY_RUN),
         ]

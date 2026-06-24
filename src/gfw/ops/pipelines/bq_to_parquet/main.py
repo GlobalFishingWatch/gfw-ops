@@ -47,8 +47,8 @@ def run(
     partition_fields: Sequence[str] = (),
     partition_time: str = "hour",
     partition_prefix: str = "event_",
-    gcs_window_size: int = 3600,
-    gcs_num_shards: int = 6,
+    window_size: int = 3600,
+    num_shards: int = 6,
     dry_run: bool = False,
     read_from_bigquery_factory: Callable = ReadFromBigQuery.get_client_factory(),
     parquet_sink_factory: Callable[..., ParquetSink] = ParquetSink,
@@ -84,17 +84,17 @@ def run(
         partition_fields:
             Extra hive partition dimensions (field names from the row).
 
-        partition_time_granularity:
+        partition_time:
             Time partition granularity: "hour" or "day".
 
         partition_prefix:
             Prefix applied to every partition key name in the output path.
             Defaults to ``"event_"``.
 
-        gcs_window_size:
+        window_size:
             Beam window size in seconds.
 
-        gcs_num_shards:
+        num_shards:
             Output files per partition per window.
 
         dry_run:
@@ -148,8 +148,8 @@ def run(
             >> WritePartitionedParquet(
                 path=gcs_out,
                 schema=schema,
-                window_size=gcs_window_size,
-                num_shards=gcs_num_shards,
+                window_size=window_size,
+                num_shards=num_shards,
                 partition=partition,
                 sink_factory=parquet_sink_factory,
             ),
