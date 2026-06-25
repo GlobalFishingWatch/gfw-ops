@@ -1,0 +1,34 @@
+bq_in: world-fishing-827.pipe_ais_sources_v20201001.pipe-nmea-parsed
+gcs_out: gs://gfw-int-ais-datalake-vessel-transmissions-v1/messages
+schema_file: ./examples/assets/parsed-nmea-schema.json
+start_date: "2024-01-01"
+end_date: "2024-02-01"
+project: world-fishing-827
+timestamp_field: tagblock_timestamp
+partition_fields: ["source"]
+partition_time: hour
+partition_prefix: event_
+gcs_window_size: 3600
+gcs_num_shards: 20
+dry_run: false
+
+# Apache Beam options
+runner: dataflow
+max_num_workers: 400
+machine_type: e2-highmem-2
+project: world-fishing-827
+region: us-central1
+network: gfw-internal-network
+subnetwork: regions/us-central1/subnetworks/gfw-internal-us-central1
+temp_location: gs://world-fishing-827-us-central1-dataflow/ttl7/temp
+staging_location: gs://world-fishing-827-us-central1-dataflow/ttl7/staging
+# sdk_container_image: us-central1-docker.pkg.dev/gfw-int-infrastructure/ingestion/gfw-ops:main
+service_account_email: engineering-development@world-fishing-827.iam.gserviceaccount.com
+labels:
+  environment: development
+  resource_creator: tom
+  project: ais-ingestion
+  version: v1
+  step: pipe-nmea
+  stage: dev
+job_name: gfw-ops-bq-to-parquet

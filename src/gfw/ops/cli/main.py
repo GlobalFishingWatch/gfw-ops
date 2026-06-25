@@ -7,6 +7,7 @@ import sys
 from gfw.common.cli import CLI
 from gfw.common.logging import LoggerConfig
 
+from gfw.ops.cli.commands.bq_to_parquet import BqToParquet
 from gfw.ops.cli.commands.sharded_to_partitioned import ShardedToPartitioned
 from gfw.ops.version import __version__
 
@@ -18,8 +19,10 @@ def run(args: list[str]) -> None:
         description="GFW operational data engineering tools.",
         subcommands=[
             ShardedToPartitioned,
+            BqToParquet,
         ],
         version=__version__,
+        allow_unknown=True,
         examples=(
             "gfw-ops sharded-to-partitioned --help",
             (
