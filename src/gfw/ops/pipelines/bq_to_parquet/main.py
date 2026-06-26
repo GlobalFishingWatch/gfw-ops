@@ -51,6 +51,7 @@ def run(
     num_shards: int = 6,
     dry_run: bool = False,
     read_from_bigquery_factory: Callable = ReadFromBigQuery.get_client_factory(),
+    bq_client_factory: Callable = BigQueryHelper.get_client_factory(),
     parquet_sink_factory: Callable[..., ParquetSink] = ParquetSink,
     unknown_unparsed_args: tuple = (),
     unknown_parsed_args: dict | None = None,
@@ -103,6 +104,10 @@ def run(
         read_from_bigquery_factory:
             Injectable factory for the BigQuery source — useful for testing.
 
+        bq_client_factory:
+            Injectable factory for :class:`~gfw.common.bigquery.BigQueryHelper` — used for
+            schema fetching. Useful for testing.
+
         parquet_sink_factory:
             Injectable :class:`~gfw.common.beam.transforms.ParquetSink` factory passed
             to :class:`~gfw.common.beam.transforms.WritePartitionedParquet`. Inject
@@ -124,9 +129,10 @@ def run(
     logger.info(f"Query:\n{query}")
 
     if schema_file is not None:
-        schema = Schema.from_json(schema_file).as_pyarrow()
+        bq_schema = Schema.from_json(schema_file)
     else:
-        schema = BigQueryHelper(project=project).fetch_schema(bq_in).as_pyarrow()
+        bq = BigQueryHelper(project=project, client_factory=bq_client_factory)
+        bq_schema = bq.fetch_schema(bq_in)
 
     partition = HivePartitionConfig(
         fields={f: lambda x: x for f in partition_fields},
@@ -147,7 +153,7 @@ def run(
             "WriteToParquet"
             >> WritePartitionedParquet(
                 path=gcs_out,
-                schema=schema,
+                schema=bq_schema.as_pyarrow(),
                 window_size=window_size,
                 num_shards=num_shards,
                 partition=partition,
@@ -171,4 +177,5 @@ def run(
         return pipeline
 
     pipeline.run()
+
     return pipeline
