@@ -1,5 +1,5 @@
 bq_in: world-fishing-827.pipe_ais_sources_v20201001.pipe-nmea-parsed
-gcs_out: gs://engineering-development-ttl30/tomas.link/messages_migrated
+gcs_out: gs://engineering-development-ttl30/tomas.link/gfw_ops_external_table
 schema_file: ./examples/assets/parsed-nmea-schema.json
 start_date: "2023-01-01"
 end_date: "2023-01-02"
@@ -8,8 +8,8 @@ timestamp_field: tagblock_timestamp
 partition_fields: ["source"]
 partition_time: hour
 partition_prefix: event_
-gcs_window_size: 3600
-gcs_num_shards: 20
+window_size: 3600
+num_shards: 20
 dry_run: false
 
 # Apache Beam options

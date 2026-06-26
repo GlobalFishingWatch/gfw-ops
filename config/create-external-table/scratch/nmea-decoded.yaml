@@ -1,0 +1,4 @@
+reference: world-fishing-827.pipe_ais_sources_v20201001.pipe-nmea-parsed
+gcs_path: gs://engineering-development-ttl30/tomas.link/gfw_ops_external_table
+external_table: world-fishing-827.scratch_tomas_ttl30d.gfw_ops_external_table
+project: world-fishing-827
