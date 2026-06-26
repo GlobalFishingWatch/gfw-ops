@@ -25,6 +25,10 @@ HELP_WINDOW_SIZE = "Beam window size in seconds."
 HELP_NUM_SHARDS = "Number of output files per partition per window."
 HELP_RUNNER = "Beam runner: DirectRunner or DataflowRunner."
 HELP_DRY_RUN = "Log the query and exit without writing."
+HELP_EXTERNAL_TABLE = (
+    "Fully-qualified BigQuery external table to create or replace after the pipeline runs "
+    "(project.dataset.table). The table will point to the GCS output with hive partitioning."
+)
 
 
 class BqToParquet(Command):
@@ -58,6 +62,7 @@ class BqToParquet(Command):
             Option("--num-shards", type=int, default=6, help=HELP_NUM_SHARDS),
             Option("--runner", type=str, default="DataflowRunner", help=HELP_RUNNER),
             Option("--dry-run", type=bool, default=False, help=HELP_DRY_RUN),
+            Option("--external-table", type=str, required=False, help=HELP_EXTERNAL_TABLE),
         ]
 
     def run(self, config: SimpleNamespace, **kwargs: Any) -> None:

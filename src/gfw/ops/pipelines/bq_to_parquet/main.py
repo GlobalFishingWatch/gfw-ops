@@ -50,7 +50,9 @@ def run(
     window_size: int = 3600,
     num_shards: int = 6,
     dry_run: bool = False,
+    external_table: str | None = None,
     read_from_bigquery_factory: Callable = ReadFromBigQuery.get_client_factory(),
+    bq_client_factory: Callable = BigQueryHelper.get_client_factory(),
     parquet_sink_factory: Callable[..., ParquetSink] = ParquetSink,
     unknown_unparsed_args: tuple = (),
     unknown_parsed_args: dict | None = None,
@@ -100,8 +102,17 @@ def run(
         dry_run:
             Build the pipeline and return it without executing.
 
+        external_table:
+            Fully-qualified BigQuery external table to create or replace after the
+            pipeline runs (``project.dataset.table``). The table will point to
+            ``gcs_out`` with hive partitioning enabled. If ``None``, skipped.
+
         read_from_bigquery_factory:
             Injectable factory for the BigQuery source — useful for testing.
+
+        bq_client_factory:
+            Injectable factory for :class:`~gfw.common.bigquery.BigQueryHelper` — used for
+            schema fetching and external table creation. Useful for testing.
 
         parquet_sink_factory:
             Injectable :class:`~gfw.common.beam.transforms.ParquetSink` factory passed
@@ -123,10 +134,13 @@ def run(
     logger.info(f"Exporting {bq_in} for [{start_date}, {end_date}) to {gcs_out}")
     logger.info(f"Query:\n{query}")
 
+    bq = BigQueryHelper(project=project, client_factory=bq_client_factory)
+    source_table = bq.client.get_table(bq_in)
+
     if schema_file is not None:
-        schema = Schema.from_json(schema_file).as_pyarrow()
+        bq_schema = Schema.from_json(schema_file)
     else:
-        schema = BigQueryHelper(project=project).fetch_schema(bq_in).as_pyarrow()
+        bq_schema = Schema(list(source_table.schema))
 
     partition = HivePartitionConfig(
         fields={f: lambda x: x for f in partition_fields},
@@ -147,7 +161,7 @@ def run(
             "WriteToParquet"
             >> WritePartitionedParquet(
                 path=gcs_out,
-                schema=schema,
+                schema=bq_schema.as_pyarrow(),
                 window_size=window_size,
                 num_shards=num_shards,
                 partition=partition,
@@ -171,4 +185,16 @@ def run(
         return pipeline
 
     pipeline.run()
+
+    if external_table is not None:
+        logger.info(f"Creating external table {external_table} pointing to {gcs_out}")
+        bq.create_external_table(
+            table=external_table,
+            source_uris=[f"{gcs_out}/**/*.parquet"],
+            hive_partition_uri_prefix=gcs_out,
+            schema=bq_schema.fields,
+            description=source_table.description or "",
+            replace=True,
+        )
+
     return pipeline
