@@ -28,6 +28,13 @@ def test_build_query_uses_timestamp_field():
     assert "DATE(event_time)" in q
 
 
+def test_build_query_sharded():
+    q = _build_query("proj.ds.table_", "2024-01-01", "2024-02-01", "timestamp", sharded=True)
+    assert "proj.ds.table_*" in q
+    assert "_TABLE_SUFFIX >= '20240101'" in q
+    assert "_TABLE_SUFFIX < '20240201'" in q
+
+
 def test_assign_timestamp():
     fn = _assign_timestamp("timestamp")
     ts = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
@@ -50,6 +57,24 @@ def test_dry_run_returns_pipeline(tmp_path):
         schema_file=str(schema_file),
         start_date="2024-01-01",
         end_date="2024-02-01",
+        dry_run=True,
+    )
+    assert isinstance(result, Pipeline)
+
+
+def test_dry_run_sharded(tmp_path):
+    schema_file = tmp_path / "schema.json"
+    schema_file.write_text(json.dumps([
+        {"name": "timestamp", "type": "TIMESTAMP", "mode": "NULLABLE"},
+    ]))
+    result = run(
+        bq_in="proj.ds.table_",
+        gcs_out="gs://bucket/path",
+        project="proj",
+        schema_file=str(schema_file),
+        start_date="2024-01-01",
+        end_date="2024-02-01",
+        sharded=True,
         dry_run=True,
     )
     assert isinstance(result, Pipeline)

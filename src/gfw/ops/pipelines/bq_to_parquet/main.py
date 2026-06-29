@@ -21,7 +21,21 @@ from gfw.ops.version import __version__
 logger = logging.getLogger(__name__)
 
 
-def _build_query(bq_in: str, start_date: str, end_date: str, timestamp_field: str) -> str:
+def _build_query(
+    bq_in: str,
+    start_date: str,
+    end_date: str,
+    timestamp_field: str,
+    sharded: bool = False,
+) -> str:
+    if sharded:
+        start_suffix = start_date.replace("-", "")
+        end_suffix = end_date.replace("-", "")
+        return (
+            f"SELECT * FROM `{bq_in}*` "
+            f"WHERE _TABLE_SUFFIX >= '{start_suffix}'"
+            f" AND _TABLE_SUFFIX < '{end_suffix}'"
+        )
     return (
         f"SELECT * FROM `{bq_in}` "
         f"WHERE DATE({timestamp_field}) >= '{start_date}'"
@@ -43,6 +57,7 @@ def run(
     end_date: str,
     project: str,
     schema_file: str | None = None,
+    sharded: bool = False,
     timestamp_field: str = "timestamp",
     partition_fields: Sequence[str] = (),
     partition_time: str = "hour",
@@ -78,6 +93,11 @@ def run(
         schema_file:
             Path to a BigQuery JSON schema file. If ``None``, the schema is
             fetched directly from the BigQuery table.
+
+        sharded:
+            Set to ``True`` for date-sharded tables (``table_YYYYMMDD``). The
+            query will use ``_TABLE_SUFFIX`` filtering instead of a timestamp
+            field filter.
 
         timestamp_field:
             Field used for windowing and date filtering.
@@ -123,7 +143,7 @@ def run(
         **kwargs:
             Additional keyword args forwarded to Beam PipelineOptions.
     """
-    query = _build_query(bq_in, start_date, end_date, timestamp_field)
+    query = _build_query(bq_in, start_date, end_date, timestamp_field, sharded=sharded)
 
     logger.info(f"Exporting {bq_in} for [{start_date}, {end_date}) to {gcs_out}")
     logger.info(f"Query:\n{query}")
@@ -132,7 +152,8 @@ def run(
         bq_schema = Schema.from_json(schema_file)
     else:
         bq = BigQueryHelper(project=project, client_factory=bq_client_factory)
-        bq_schema = bq.fetch_schema(bq_in)
+        schema_table = f"{bq_in}{start_date.replace('-', '')}" if sharded else bq_in
+        bq_schema = bq.fetch_schema(schema_table)
 
     partition = HivePartitionConfig(
         fields={f: lambda x: x for f in partition_fields},

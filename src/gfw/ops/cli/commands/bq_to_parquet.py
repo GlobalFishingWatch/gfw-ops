@@ -24,6 +24,7 @@ HELP_PART_PREFIX = "Prefix applied to every partition key name in the output pat
 HELP_WINDOW_SIZE = "Beam window size in seconds."
 HELP_NUM_SHARDS = "Number of output files per partition per window."
 HELP_RUNNER = "Beam runner: DirectRunner or DataflowRunner."
+HELP_SHARDED = "Source is a date-sharded table (table_YYYYMMDD). Uses _TABLE_SUFFIX filtering instead of a timestamp field filter."
 HELP_DRY_RUN = "Log the query and exit without writing."
 
 
@@ -56,6 +57,7 @@ class BqToParquet(Command):
             Option("--partition-prefix", type=str, default="event_", help=HELP_PART_PREFIX),
             Option("--window-size", type=int, default=3600, help=HELP_WINDOW_SIZE),
             Option("--num-shards", type=int, default=6, help=HELP_NUM_SHARDS),
+            Option("--sharded", type=bool, default=False, help=HELP_SHARDED),
             Option("--runner", type=str, default="DataflowRunner", help=HELP_RUNNER),
             Option("--dry-run", type=bool, default=False, help=HELP_DRY_RUN),
         ]
