@@ -174,3 +174,5 @@ test/
 # UV
 .python-version
 uv.lock
+# Claude Code memory
+memory/

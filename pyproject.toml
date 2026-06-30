@@ -12,7 +12,7 @@ namespaces = true
 
 [project]
 name = "gfw-ops"
-version = "0.2.1"
+version = "0.3.0"
 description = "Reusable operational data engineering tools for GFW projects."
 readme = "README.md"
 license = "Apache-2.0"
@@ -30,9 +30,10 @@ classifiers = [
 ]
 requires-python = ">= 3.12"
 dependencies = [
+    "cloudpathlib[gs]~=0.24",
     "gfw-common[bq]~=0.14",
     "google-cloud-bigquery~=3.0",
-    "apache-beam[gcp]>=2.74",
+    "google-cloud-storage~=2.0",
     "pyyaml~=6.0",
     "rich~=14.0",
     "rich-argparse~=1.6",

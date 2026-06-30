@@ -1,53 +1,64 @@
 """Export a date range from a BigQuery table to hive-partitioned Parquet files on GCS."""
 from __future__ import annotations
 
+import datetime
 import logging
-from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Callable
 
-import apache_beam as beam
+from cloudpathlib import GSPath
+from google.cloud import bigquery, storage
 
-from gfw.common.beam.pipeline import LinearDag, Pipeline
-from gfw.common.beam.transforms import ReadFromBigQuery
-from gfw.common.beam.transforms.parquet import (
-    HivePartitionConfig,
-    ParquetSink,
-    WritePartitionedParquet,
-)
-from gfw.common.bigquery import BigQueryHelper, Schema
-from gfw.ops.version import __version__
+from gfw.ops.pipelines.bq_to_parquet.destination import HiveDestination
+from gfw.ops.pipelines.bq_to_parquet.job import ExportJob, ExportJobResults
+from gfw.ops.pipelines.bq_to_parquet.source import Source
 
 
 logger = logging.getLogger(__name__)
 
 
-def _build_query(
-    bq_in: str,
-    start_date: str,
-    end_date: str,
-    timestamp_field: str,
-    sharded: bool = False,
-) -> str:
-    if sharded:
-        start_suffix = start_date.replace("-", "")
-        end_suffix = end_date.replace("-", "")
-        return (
-            f"SELECT * FROM `{bq_in}*` "
-            f"WHERE _TABLE_SUFFIX >= '{start_suffix}'"
-            f" AND _TABLE_SUFFIX < '{end_suffix}'"
+def _date_range(start_date: str, end_date: str) -> list[datetime.date]:
+    # TODO: move this to gfw-common.
+    start = datetime.date.fromisoformat(start_date)
+    end = datetime.date.fromisoformat(end_date)
+    dates: list[datetime.date] = []
+    current = start
+    while current < end:
+        dates.append(current)
+        current += datetime.timedelta(days=1)
+
+    return dates
+
+
+@dataclass
+class Exporter:
+    """Orchestrates BQ extract jobs for a source/destination pair."""
+
+    bq_client: bigquery.Client
+    source: Source
+    destination: HiveDestination
+
+    def run(self, dates: list[datetime.date]) -> ExportJobResults:
+        """Submit extract jobs for dates with no existing output and wait for completion."""
+        pending = [self.submit_job(date) for date in self.remaining_dates(dates)]
+        return ExportJobResults([job.wait() for job in pending])
+
+    def submit_job(self, date: datetime.date) -> ExportJob:
+        """Submit a BQ extract job for a single date and return immediately."""
+        bq_reference = self.source.ref(date)
+        gcs_reference = self.destination.uri(date)
+
+        job = self.bq_client.extract_table(
+            bq_reference,
+            gcs_reference,
+            job_config=self.destination.extract_job_config
         )
-    return (
-        f"SELECT * FROM `{bq_in}` "
-        f"WHERE DATE({timestamp_field}) >= '{start_date}'"
-        f" AND DATE({timestamp_field}) < '{end_date}'"
-    )
+        logger.info(f"Submitted {job.job_id}: {bq_reference} -> {gcs_reference}")
+        return ExportJob(date=date, job=job)
 
-
-def _assign_timestamp(timestamp_field: str) -> Callable[[dict], beam.window.TimestampedValue]:
-    def _fn(row: dict) -> beam.window.TimestampedValue:
-        return beam.window.TimestampedValue(row, row[timestamp_field].timestamp())
-
-    return _fn
+    def remaining_dates(self, dates: list[datetime.date]) -> list[datetime.date]:
+        exported = self.destination.existing_dates(dates)
+        return [d for d in dates if d not in exported]
 
 
 def run(
@@ -56,23 +67,21 @@ def run(
     start_date: str,
     end_date: str,
     project: str,
-    schema_file: str | None = None,
+    event_source: str,
     sharded: bool = False,
-    timestamp_field: str = "timestamp",
-    partition_fields: Sequence[str] = (),
-    partition_time: str = "hour",
     partition_prefix: str = "event_",
-    window_size: int = 3600,
-    num_shards: int = 6,
     dry_run: bool = False,
-    read_from_bigquery_factory: Callable = ReadFromBigQuery.get_client_factory(),
-    bq_client_factory: Callable = BigQueryHelper.get_client_factory(),
-    parquet_sink_factory: Callable[..., ParquetSink] = ParquetSink,
+    bq_client_factory: Callable[[str], bigquery.Client] = bigquery.Client,
+    gcs_client_factory: Callable[[str], storage.Client] = storage.Client,
     unknown_unparsed_args: tuple = (),
     unknown_parsed_args: dict | None = None,
     **kwargs: Any,
-) -> Pipeline:
+) -> None:
     """Export a date range from a BigQuery table to hive-partitioned Parquet files on GCS.
+
+    Submits one BQ extract job per day for dates with no existing output, then waits for
+    completion. Dates that already have files in GCS are skipped, making Airflow retries safe.
+    Output path: ``{gcs_out}/{prefix}source={event_source}/{prefix}date=YYYY-MM-DD/*.parquet``.
 
     Args:
         bq_in:
@@ -88,115 +97,71 @@ def run(
             End date, exclusive (YYYY-MM-DD).
 
         project:
-            GCP project for schema fetching and Beam pipeline options.
+            GCP project used for billing.
 
-        schema_file:
-            Path to a BigQuery JSON schema file. If ``None``, the schema is
-            fetched directly from the BigQuery table.
+        event_source:
+            Value written as the ``{prefix}source`` hive partition key in the output path
+            (e.g. ``"wf827-pipe-nmea-parsed"``).
 
         sharded:
-            Set to ``True`` for date-sharded tables (``table_YYYYMMDD``). The
-            query will use ``_TABLE_SUFFIX`` filtering instead of a timestamp
-            field filter.
-
-        timestamp_field:
-            Field used for windowing and date filtering.
-
-        partition_fields:
-            Extra hive partition dimensions (field names from the row).
-
-        partition_time:
-            Time partition granularity: "hour" or "day".
+            Set to ``True`` for date-sharded tables (``table_YYYYMMDD``). Each shard is
+            addressed directly. Missing shards are skipped with a warning.
 
         partition_prefix:
-            Prefix applied to every partition key name in the output path.
-            Defaults to ``"event_"``.
-
-        window_size:
-            Beam window size in seconds.
-
-        num_shards:
-            Output files per partition per window.
+            Prefix applied to partition key names in the hive output path.
+            Defaults to ``"event_"``, producing keys like ``event_source`` and ``event_date``.
 
         dry_run:
-            Build the pipeline and return it without executing.
-
-        read_from_bigquery_factory:
-            Injectable factory for the BigQuery source — useful for testing.
+            Log the planned exports and return without submitting any jobs.
 
         bq_client_factory:
-            Injectable factory for :class:`~gfw.common.bigquery.BigQueryHelper` — used for
-            schema fetching. Useful for testing.
+            Callable used to instantiate the BQ client. Override in tests to inject a mock.
+            Defaults to :class:`google.cloud.bigquery.Client`.
 
-        parquet_sink_factory:
-            Injectable :class:`~gfw.common.beam.transforms.ParquetSink` factory passed
-            to :class:`~gfw.common.beam.transforms.WritePartitionedParquet`. Inject
-            :class:`~gfw.common.beam.transforms.FakeParquetSink` in tests to bypass
-            GCS writes while still exercising windowing and partitioning logic.
+        gcs_client_factory:
+            Callable used to instantiate the GCS client. Override in tests to inject a mock.
+            Defaults to :class:`google.cloud.storage.Client`.
 
         unknown_unparsed_args:
-            Extra unparsed CLI args forwarded to Beam.
+            Extra unparsed CLI args (ignored).
 
         unknown_parsed_args:
-            Extra parsed args forwarded to Beam.
-
-        **kwargs:
-            Additional keyword args forwarded to Beam PipelineOptions.
+            Extra parsed args (ignored).
     """
-    query = _build_query(bq_in, start_date, end_date, timestamp_field, sharded=sharded)
-
-    logger.info(f"Exporting {bq_in} for [{start_date}, {end_date}) to {gcs_out}")
-    logger.info(f"Query:\n{query}")
-
-    if schema_file is not None:
-        bq_schema = Schema.from_json(schema_file)
-    else:
-        bq = BigQueryHelper(project=project, client_factory=bq_client_factory)
-        schema_table = f"{bq_in}{start_date.replace('-', '')}" if sharded else bq_in
-        bq_schema = bq.fetch_schema(schema_table)
-
-    partition = HivePartitionConfig(
-        fields={f: lambda x: x for f in partition_fields},
-        prefix=partition_prefix,
-        time_granularity=partition_time,
+    dates = _date_range(start_date, end_date)
+    source = Source.create(bq_in, sharded)
+    destination = HiveDestination(
+        gcs_out=GSPath(gcs_out),
+        event_source=event_source,
+        partition_prefix=partition_prefix,
+        gcs_client=gcs_client_factory(project=project),
     )
 
-    dag = LinearDag(
-        sources=(
-            "ReadFromBigQuery"
-            >> ReadFromBigQuery(
-                query=query,
-                read_from_bigquery_factory=read_from_bigquery_factory,
-            ),
-        ),
-        core="AssignTimestamps" >> beam.Map(_assign_timestamp(timestamp_field)),
-        sinks=(
-            "WriteToParquet"
-            >> WritePartitionedParquet(
-                path=gcs_out,
-                schema=bq_schema.as_pyarrow(),
-                window_size=window_size,
-                num_shards=num_shards,
-                partition=partition,
-                sink_factory=parquet_sink_factory,
-            ),
-        ),
-    )
-
-    beam_options = {**kwargs, **(unknown_parsed_args or {})}
-
-    pipeline = Pipeline(
-        name="bq-to-parquet",
-        version=__version__,
-        dag=dag,
-        unparsed_args=unknown_unparsed_args,
-        project=project,
-        **beam_options,
+    logger.info(
+        f"Exporting {bq_in} for [{start_date}, {end_date}) ({len(dates)} days) to {gcs_out}"
     )
 
     if dry_run:
-        return pipeline
+        for date in dates:
+            logger.info(f"[dry-run] {source.ref(date)} -> {destination.uri(date)}")
 
-    pipeline.run()
+        return
 
-    return pipeline
+    exporter = Exporter(
+        bq_client=bq_client_factory(project=project),
+        source=source,
+        destination=destination,
+    )
+
+    results = exporter.run(dates)
+
+    if results.failed:
+        raise RuntimeError(
+            f"Export failed for {len(results.failed)} date(s): "
+            f"{[job.date for job in results.failed]}. "
+            "Retrying this task will skip already-exported dates and resume from the failures."
+        )
+
+    logger.info(
+        f"Done: {len(results.succeeded)} exported, {len(results.skipped)} skipped (not found)"
+    )
