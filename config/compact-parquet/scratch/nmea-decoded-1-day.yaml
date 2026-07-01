@@ -1,0 +1,9 @@
+gcs_path: gs://engineering-development-ttl30/tomas.link/parquet-migration/messages
+event_source: wf827-pipe-nmea-parsed
+start_date: "2023-01-01"
+end_date: "2023-01-02"
+project: world-fishing-827
+partition_prefix: event_
+target_file_size_mb: 512
+# staging_path defaults to gs://engineering-development-ttl30/tomas.link/parquet-migration/_compact_messages_staging
+dry_run: false
