@@ -166,6 +166,8 @@ six==1.17.0
     # via python-dateutil
 sqlparse==0.5.0
     # via gfw-common
+tenacity==9.1.4
+    # via gfw-ops (pyproject.toml)
 typing-extensions==4.15.0
     # via
     #   aiohttp
