@@ -5,12 +5,14 @@ import datetime
 import logging
 import time
 from dataclasses import dataclass, field
+
 from typing import Any, Callable, Optional
 
-import gcsfs
 import duckdb
+import gcsfs
 from cloudpathlib import GSPath
 from google.cloud import storage
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 
 
 logger = logging.getLogger(__name__)
@@ -29,14 +31,44 @@ def _date_range(start_date: str, end_date: str) -> list[datetime.date]:
     return dates
 
 
-def _duckdb_conn(memory_limit: str = "8GB", threads: int = 4) -> duckdb.DuckDBPyConnection:
-    """Return a DuckDB connection authenticated against GCS via application default credentials."""
-    conn = duckdb.connect()
-    conn.execute(f"SET memory_limit='{memory_limit}'")
-    conn.execute(f"SET threads={threads}")
-    conn.execute("SET preserve_insertion_order=false")
+def _duckdb_conn(memory_limit: int = 8, threads: int = 4) -> duckdb.DuckDBPyConnection:
+    conn = duckdb.connect(
+        config={
+            "memory_limit": f"{memory_limit}GB",
+            "threads": threads,
+            "preserve_insertion_order": False,
+        }
+    )
     conn.register_filesystem(gcsfs.GCSFileSystem())
     return conn
+
+
+@dataclass
+class CompactionQuery:
+    """Renders the DuckDB COPY statement for a single compaction job."""
+
+    source_uris: list[str]
+    dest_dir: str
+    target_file_size_mb: int
+
+    _TEMPLATE = (
+        "COPY (SELECT * FROM read_parquet({files_sql}))\n"
+        "TO '{dest_dir}'\n"
+        "(\n"
+        "    FORMAT PARQUET,\n"
+        "    COMPRESSION SNAPPY,\n"
+        "    FILE_SIZE_BYTES {target_bytes},\n"
+        "    PER_THREAD_OUTPUT false\n"
+        ")"
+    )
+
+    def render(self) -> str:
+        files_sql = "[" + ", ".join(f"'{u}'" for u in self.source_uris) + "]"
+        return self._TEMPLATE.format(
+            files_sql=files_sql,
+            dest_dir=self.dest_dir,
+            target_bytes=self.target_file_size_mb * _MB,
+        )
 
 
 @dataclass
@@ -60,15 +92,35 @@ class Compactor:
     event_source: str
     partition_prefix: str
     target_file_size_mb: int
-    gcs_staging_path: Optional[GSPath] = None
-    conn_factory: Callable[[], duckdb.DuckDBPyConnection] = _duckdb_conn
+    gcs_staging_path: GSPath | None = None
+    memory_limit_gb: int = 8
+    threads: int = 4
+    conn_factory: Callable[..., duckdb.DuckDBPyConnection] = _duckdb_conn
+    max_retries: int = 3
     swap: bool = field(init=False)
+
+    _connection: Optional[duckdb.DuckDBPyConnection] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.swap = False
         if self.gcs_staging_path is None:
             self.gcs_staging_path = self.default_staging_path
             self.swap = True
+
+    @property
+    def connection(self) -> duckdb.DuckDBPyConnection:
+        if self._connection is None:
+            self._connection = self.conn_factory(
+                memory_limit=self.memory_limit_gb, threads=self.threads
+            )
+        return self._connection
+
+    def close_connection(self) -> None:
+        if self._connection is None:
+            return
+
+        self._connection.close()
+        self._connection = None
 
     @property
     def default_staging_path(self) -> GSPath:
@@ -80,9 +132,29 @@ class Compactor:
         logger.info(f"Starting compaction: {total} date(s) to process")
         for i, date in enumerate(dates, 1):
             logger.info(f"[{i}/{total}] {date}")
-            self._compact(date)
-
+            self._compact_with_retry(date)
+        self.close_connection()
         logger.info(f"Finished compaction: {total} date(s) processed")
+
+    def _compact_with_retry(self, date: datetime.date) -> None:
+        def before_sleep(retry_state: Retrying) -> None:
+            logger.warning(
+                f"Attempt {retry_state.attempt_number}/{self.max_retries} failed for {date}: "
+                f"{retry_state.outcome.exception()}. Retrying..."
+            )
+            self.close_connection()
+
+        for attempt in Retrying(
+            # InvalidInputException covers Snappy decompression failures from partial GCS reads,
+            # which DuckDB surfaces as a parse/input error rather than an I/O error. Confirmed
+            # transient: retrying the same date succeeds.
+            retry=retry_if_exception_type((duckdb.IOException, duckdb.InvalidInputException)),
+            stop=stop_after_attempt(self.max_retries),
+            before_sleep=before_sleep,
+            reraise=True,
+        ):
+            with attempt:
+                self._compact(date)
 
     def _partition_path(self, base: GSPath, date: datetime.date) -> GSPath:
         p = self.partition_prefix
@@ -147,24 +219,13 @@ class Compactor:
         """Compact source files into dest_path using DuckDB."""
         dest_part = self._partition_path(dest_path, date)
         dest_dir = f"gs://{dest_part.bucket}/{dest_part.blob}"
-        files_sql = "[" + ", ".join(f"'{u}'" for u in source_uris) + "]"
-        target_bytes = self.target_file_size_mb * _MB
-
-        conn = self.conn_factory()
-        logger.info(f"Writing compacted output to {dest_dir}")
-        conn.execute(
-            f"""
-            COPY (SELECT * FROM read_parquet({files_sql}))
-            TO '{dest_dir}'
-            (
-                FORMAT PARQUET,
-                COMPRESSION SNAPPY,
-                FILE_SIZE_BYTES {target_bytes},
-                PER_THREAD_OUTPUT false
-            )
-        """
+        query = CompactionQuery(
+            source_uris=source_uris,
+            dest_dir=dest_dir,
+            target_file_size_mb=self.target_file_size_mb,
         )
-        conn.close()
+        logger.info(f"Writing compacted output to {dest_dir}")
+        self.connection.execute(query.render())
 
         written = self._list_parquet_blobs(dest_path, date)
         logger.info(f"Wrote {len(written)} file(s) to {dest_dir}")
@@ -195,7 +256,9 @@ def run(
     end_date: str,
     partition_prefix: str = "event_",
     target_file_size_mb: int = 512,
-    memory_limit: str = "8GB",
+    memory_limit_gb: int = 8,
+    threads: int = 4,
+    max_retries: int = 3,
     gcs_staging_path: str | None = None,
     dry_run: bool = False,
     gcs_client_factory: Callable[[str], storage.Client] = storage.Client,
@@ -207,16 +270,16 @@ def run(
     """Compact small hive-partitioned Parquet files on GCS into larger files.
 
     For each date partition, DuckDB reads all source files in parallel and writes
-    compacted output to a staging path. The staged files are then swapped into the
-    original partition path so the external table path never changes. If the process
-    is interrupted after deleting originals, the next run detects the staged files
-    and resumes the copy step automatically.
+    compacted output to an auto-generated staging sibling path. The staged files are
+    then swapped into the original partition path so the external table path never
+    changes. If the process is interrupted after deleting originals, the next run
+    detects the staged files and resumes the copy step automatically.
 
     Path structure::
 
         {gcs_output_path}/{prefix}source={event_source}/{prefix}date=YYYY-MM-DD/*.parquet
 
-    Staging path defaults to ``gs://{bucket}/{parent}/_compact_{table}_staging``
+    Staging path: ``gs://{bucket}/{parent}/_compact_{table}_staging``
     (sibling of the table directory, same bucket so copies are server-side).
 
     Args:
@@ -242,6 +305,10 @@ def run(
         target_file_size_mb:
             Target size for each output file in MB. Defaults to 512.
 
+        max_retries:
+            Number of retries on transient DuckDB I/O errors before failing the task.
+            Defaults to 3.
+
         gcs_staging_path:
             When ``None`` (default), operates in swap mode: compacted files are written
             to an auto-generated staging sibling path, the originals are deleted, and the
@@ -254,15 +321,6 @@ def run(
 
         gcs_client_factory:
             Injectable factory for :class:`~google.cloud.storage.Client`.
-
-        memory_limit:
-            DuckDB memory cap (e.g. ``"8GB"``). DuckDB spills to disk beyond this limit.
-            Defaults to ``"8GB"``. Set lower on machines with less RAM, higher on GKE pods.
-
-        conn_factory:
-            Injectable factory for a configured DuckDB connection. Defaults to
-            :func:`_duckdb_conn` which authenticates via application default credentials.
-            Override in tests to avoid real GCS calls.
 
         unknown_unparsed_args:
             Extra unparsed CLI args (ignored).
@@ -281,7 +339,6 @@ def run(
             logger.info(f"[dry-run] {gcs_output_path}/{p}source={event_source}/{p}date={date}")
         return
 
-    resolved_conn_factory = conn_factory or (lambda: _duckdb_conn(memory_limit=memory_limit))
     gcs_client = gcs_client_factory(project=project)
     compactor = Compactor(
         gcs_client=gcs_client,
@@ -290,6 +347,9 @@ def run(
         partition_prefix=partition_prefix,
         target_file_size_mb=target_file_size_mb,
         gcs_staging_path=GSPath(gcs_staging_path.rstrip("/")) if gcs_staging_path else None,
-        conn_factory=resolved_conn_factory,
+        memory_limit_gb=memory_limit_gb,
+        threads=threads,
+        max_retries=max_retries,
+        conn_factory=conn_factory or _duckdb_conn,
     )
     compactor.run(dates)
