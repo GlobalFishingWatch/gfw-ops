@@ -18,8 +18,9 @@ HELP_START_DATE = "Start date to compact, inclusive (YYYY-MM-DD)."
 HELP_END_DATE = "End date to compact, exclusive (YYYY-MM-DD)."
 HELP_PART_PREFIX = "Prefix applied to partition key names in the hive path."
 HELP_TARGET_SIZE = "Target output file size in MB."
+HELP_THREADS = "Number of DuckDB threads for parallel reads/writes."
 HELP_MEMORY_LIMIT = "DuckDB memory cap (e.g. '8GB'). DuckDB spills to disk beyond this limit."
-HELP_STAGING = (
+HELP_STAGING_PATH = (
     "When omitted, operates in swap mode: compacted files are staged to an auto-generated "
     "sibling path, then swapped in-place. When set, operates in copy mode: compacted files "
     "are written to this path and source files are left untouched."
@@ -51,8 +52,9 @@ class CompactParquet(Command):
             Option("--end-date", type=str, required=True, help=HELP_END_DATE),
             Option("--partition-prefix", type=str, default="event_", help=HELP_PART_PREFIX),
             Option("--target-file-size-mb", type=int, default=512, help=HELP_TARGET_SIZE),
-            Option("--memory-limit", type=str, default="8GB", help=HELP_MEMORY_LIMIT),
-            Option("--gcs-staging-path", type=str, default=None, help=HELP_STAGING),
+            Option("--memory-limit", type=str, default="12GB", help=HELP_MEMORY_LIMIT),
+            Option("--threads", type=int, default=4, help=HELP_THREADS),
+            Option("--gcs-staging-path", type=str, default=None, help=HELP_STAGING_PATH),
             Option("--dry-run", type=bool, default=False, help=HELP_DRY_RUN),
         ]
 
