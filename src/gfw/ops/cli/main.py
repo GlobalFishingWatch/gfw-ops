@@ -7,6 +7,7 @@ import sys
 from gfw.common.cli import CLI
 from gfw.common.logging import LoggerConfig
 
+from gfw.ops.cli.commands.benchmark_parquet import BenchmarkParquet
 from gfw.ops.cli.commands.bq_to_parquet import BqToParquet
 from gfw.ops.cli.commands.compact_parquet import CompactParquet
 from gfw.ops.cli.commands.create_external_table import CreateExternalTable
@@ -24,6 +25,7 @@ def run(args: list[str]) -> None:
             BqToParquet,
             CompactParquet,
             CreateExternalTable,
+            BenchmarkParquet,
         ],
         version=__version__,
         allow_unknown=True,

@@ -150,6 +150,12 @@ addopts = "-v --cov=src --cov=init_project --cov-report=term-missing"
 branch = true
 parallel = true
 context = "${CONTEXT}"
+omit = [
+    "src/gfw/ops/pipelines/benchmark_parquet/main.py",  # Analysis, not used in production.
+    "src/gfw/ops/cli/commands/benchmark_parquet.py",    # Analysis, not used in production.
+    "**/__init__.py",
+
+]
 
 [tool.coverage.report]
 precision = 0

@@ -1,0 +1,22 @@
+project: world-fishing-827
+start_date: "2023-02-07"
+end_date: "2023-02-08"
+queries:
+  - aggregation
+agg_column: tagblock_timestamp
+runs: 3
+location: US
+max_gb_billed: 100.0
+tables:
+  native:
+    table: world-fishing-827.scratch_tomas_ttl30d.pipe_nmea_parsed_2023_feb
+    column: tagblock_timestamp
+    type: native
+  external_uncompacted:
+    table: gfw-int-ais-staging-datalake.vessel_transmissions_v1.messages__PR_2627__feature_bq_to_parquet_dag
+    column: event_date
+    type: external
+  external_compacted:
+    table: gfw-int-ais-staging-datalake.vessel_transmissions_v1._messages_compacted__PR_2627__feature_bq_to_parquet_dag
+    column: event_date
+    type: external
