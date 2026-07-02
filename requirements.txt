@@ -12,6 +12,8 @@ cryptography==47.0.0
     # via
     #   google-auth
     #   pyopenssl
+duckdb==1.6.0.dev214
+    # via gfw-ops (pyproject.toml)
 gfw-common==0.14.0
     # via gfw-ops (pyproject.toml)
 google-api-core==2.31.0
