@@ -2,7 +2,7 @@ bq_in: world-fishing-827.pipe_ais_sources_v20201001.pipe-nmea-parsed
 gcs_out: gs://engineering-development-ttl30/tomas.link/parquet-migration/messages/
 event_source: wf827-pipe-nmea-parsed
 start_date: "2023-01-01"
-end_date: "2023-01-02"
+end_date: "2023-02-01"
 project: world-fishing-827
 partition_prefix: event_
 dry_run: false
