@@ -1,8 +1,11 @@
 import datetime
+import json
+
 from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
+
 from cloudpathlib import GSPath
 
 from gfw.ops.pipelines.compact_parquet.main import Compactor, _date_range, _duckdb_conn, run
@@ -43,12 +46,14 @@ def _make_compactor(
     staging_blobs_sequence=None,
     conn_factory=None,
     gcs_staging_path=None,
+    manifest=None,
 ) -> Compactor:
     """Return a Compactor with mocked GCS client and DuckDB connection factory.
 
     staging_blobs_sequence is a list of blob lists consumed in order for each
     staging-path list_blobs call. Defaults to [] (always returns empty).
     Defaults to swap mode. Pass gcs_staging_path to get copy mode.
+    Pass manifest (a list of blob names) to simulate a pre-existing manifest file.
     """
     source_blobs = source_blobs if source_blobs is not None else _source_blobs()
     staging_iter = iter(staging_blobs_sequence or [])
@@ -61,6 +66,11 @@ def _make_compactor(
         return iter(next(staging_iter, []))
 
     mock_gcs.list_blobs.side_effect = list_blobs
+
+    manifest_blob = mock_gcs.bucket.return_value.blob.return_value
+    manifest_blob.exists.return_value = manifest is not None
+    if manifest is not None:
+        manifest_blob.download_as_text.return_value = json.dumps(manifest)
 
     return Compactor(
         gcs_client=mock_gcs,
@@ -128,7 +138,7 @@ def test_compact_skips_when_already_single_file():
 
 
 def test_compact_swap_full_flow():
-    """write staging → delete source → copy staging → delete staging."""
+    """Write staging → delete source → copy staging → delete staging."""
     source = _source_blobs(3)
     staged = _staging_blobs(1)
     # 1st staging call (existing-check): empty; 2nd (post-write list): staged
@@ -136,10 +146,13 @@ def test_compact_swap_full_flow():
 
     compactor._compact(DATE)
 
-    for blob in source:
-        blob.delete.assert_called_once()
+    bucket = compactor.gcs_client.bucket.return_value
+    deleted_names = [
+        call.args[0] for call in bucket.blob.call_args_list if not call.args[0].endswith(".json")
+    ]
+    assert set(deleted_names) == {b.name for b in source}
     staged[0].delete.assert_called_once()
-    compactor.gcs_client.bucket.return_value.copy_blob.assert_called_once()
+    bucket.copy_blob.assert_called_once()
 
 
 def test_compact_deletes_source_before_copy():
@@ -148,10 +161,9 @@ def test_compact_deletes_source_before_copy():
     staged = _staging_blobs(1)
     compactor = _make_compactor(source_blobs=source, staging_blobs_sequence=[[], staged])
     ops = []
-    source[0].delete.side_effect = lambda: ops.append("delete")
-    compactor.gcs_client.bucket.return_value.copy_blob.side_effect = lambda *a, **k: ops.append(
-        "copy"
-    )
+    bucket = compactor.gcs_client.bucket.return_value
+    bucket.blob.return_value.delete.side_effect = lambda: ops.append("delete")
+    bucket.copy_blob.side_effect = lambda *a, **k: ops.append("copy")
 
     compactor._compact(DATE)
 
@@ -161,15 +173,90 @@ def test_compact_deletes_source_before_copy():
 # --- resume interrupted swap ---
 
 
-def test_compact_resumes_interrupted_swap():
-    """If staging exists but source is gone, copy staging and clean up."""
+def test_compact_raises_on_ambiguous_state_without_manifest():
+    """Staging non-empty, source empty, no manifest: unverifiable state — must not
+    auto-recover. Refuse and surface the problem instead of guessing.
+    """
     staged = _staging_blobs(1)
     compactor = _make_compactor(source_blobs=[], staging_blobs_sequence=[staged])
 
+    with pytest.raises(RuntimeError, match="Ambiguous state"):
+        compactor._compact(DATE)
+
+    compactor.gcs_client.bucket.return_value.copy_blob.assert_not_called()
+    staged[0].delete.assert_not_called()
+
+
+def test_compact_resumes_committed_swap_via_manifest():
+    """A manifest takes priority over directory state: finish deleting exactly the
+    recorded originals and copy back, even though the live partition currently shows
+    only a partial remnant (2 of 3 originals already deleted before a crash).
+    """
+    all_originals = _source_blobs(3)
+    manifest_names = [b.name for b in all_originals]
+    surviving_remnant = all_originals[:1]
+    staged = _staging_blobs(1)
+
+    compactor = _make_compactor(
+        source_blobs=surviving_remnant,
+        staging_blobs_sequence=[staged],
+        manifest=manifest_names,
+    )
+
     compactor._compact(DATE)
 
-    compactor.gcs_client.bucket.return_value.copy_blob.assert_called_once()
+    bucket = compactor.gcs_client.bucket.return_value
+    deleted_names = [
+        call.args[0] for call in bucket.blob.call_args_list if call.args[0] in manifest_names
+    ]
+    assert set(deleted_names) == set(manifest_names)
+    bucket.copy_blob.assert_called_once()
     staged[0].delete.assert_called_once()
+    assert compactor._connection is None  # never recompacted the surviving remnant
+
+
+def test_write_and_read_manifest_round_trip():
+    compactor = _make_compactor()
+
+    compactor._write_manifest(DATE, ["a.parquet", "b.parquet"])
+
+    bucket = compactor.gcs_client.bucket.return_value
+    written_json = bucket.blob.return_value.upload_from_string.call_args[0][0]
+    assert json.loads(written_json) == ["a.parquet", "b.parquet"]
+
+
+def test_read_manifest_returns_none_when_absent():
+    compactor = _make_compactor()
+    assert compactor._read_manifest(DATE) is None
+
+
+def test_read_manifest_returns_recorded_names():
+    names = ["a.parquet", "b.parquet"]
+    compactor = _make_compactor(manifest=names)
+    assert compactor._read_manifest(DATE) == names
+
+
+def test_delete_named_blobs_tolerates_already_deleted():
+    """A blob already removed by a partial prior delete (404 on retry) is a no-op."""
+    from google.api_core.exceptions import NotFound
+
+    compactor = _make_compactor()
+    bucket = compactor.gcs_client.bucket.return_value
+    bucket.blob.return_value.delete.side_effect = [None, NotFound("gone"), None]
+
+    compactor._delete_named_blobs(GCS_PATH, ["a.parquet", "b.parquet", "c.parquet"])
+
+    assert bucket.blob.return_value.delete.call_count == 3
+
+
+def test_delete_manifest_tolerates_already_deleted():
+    from google.api_core.exceptions import NotFound
+
+    compactor = _make_compactor()
+    bucket = compactor.gcs_client.bucket.return_value
+    bucket.blob.return_value.delete.side_effect = NotFound("gone")
+
+    compactor._delete_manifest(DATE)  # no error raised
 
 
 # --- leftover staging cleanup ---
@@ -342,6 +429,7 @@ def test_run_dry_run_makes_no_gcs_calls():
 def test_run_function_runs_compactor():
     mock_gcs = MagicMock()
     mock_gcs.list_blobs.return_value = iter([])
+    mock_gcs.bucket.return_value.blob.return_value.exists.return_value = False
 
     run(
         project="proj",

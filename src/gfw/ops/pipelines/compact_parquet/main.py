@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import time
-from dataclasses import dataclass, field
 
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import duckdb
 import gcsfs
+
 from cloudpathlib import GSPath
+from google.api_core.exceptions import NotFound
 from google.cloud import storage
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 
@@ -18,6 +21,7 @@ from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 logger = logging.getLogger(__name__)
 
 _MB = 1024 * 1024
+_MANIFEST_NAME = "_manifest.json"
 
 
 def _date_range(start_date: str, end_date: str) -> list[datetime.date]:
@@ -78,8 +82,11 @@ class Compactor:
     When ``gcs_staging_path`` is ``None`` (the default), operates in *swap* mode: DuckDB
     writes compacted output to an auto-generated staging sibling path, the originals are
     deleted, and the staged files are moved back so the external table path never changes.
-    If the process is interrupted between the delete and copy steps, the next run detects
-    the staging files and resumes automatically.
+    Before deleting any originals, the exact list of blobs to delete is committed to a
+    manifest file in staging. If the process is interrupted at any point during the delete
+    (even partway through), the next run finds the manifest and knows staging already holds
+    a complete, verified replacement — so it finishes the delete from the recorded list and
+    copies back, rather than re-deriving state from what's currently on disk.
 
     When ``gcs_staging_path`` is set, operates in *copy* mode: compacted files are written
     directly to ``gcs_staging_path`` without touching the source. Use this when you want
@@ -166,18 +173,46 @@ class Compactor:
         return [b for b in blobs if b.name.endswith(".parquet")]
 
     def _compact(self, date: datetime.date) -> None:
+        manifest = self._read_manifest(date) if self.swap else None
         source_blobs = self._list_parquet_blobs(self.gcs_output_path, date)
         dest_blobs = self._list_parquet_blobs(self.gcs_staging_path, date)
 
-        if self.swap and dest_blobs and not source_blobs:
-            # Interrupted between delete-originals and copy-from-staging: resume the swap.
+        if manifest is not None:
+            # A manifest exists only once compaction fully succeeded and originals were
+            # about to be deleted, so staging is guaranteed to hold the complete replacement
+            # regardless of how far the delete-of-originals got before the interruption.
             logger.warning(
-                f"Resuming interrupted swap for {date}: "
-                f"{len(dest_blobs)} staged file(s) found, originals already deleted"
+                f"Resuming committed swap for {date}: finishing delete of "
+                f"{len(manifest)} recorded original(s) and copy-back from staging"
             )
-            self._copy_to_partition(date, dest_blobs, self.gcs_output_path)
-            self._delete_blobs(dest_blobs)
+            self._finish_swap(date, manifest, dest_blobs)
             return
+
+        if self.swap and dest_blobs and not source_blobs:
+            # Unreachable under this code's own logic: the manifest is written before any
+            # delete starts and removed only after the swap fully completes, so a crash
+            # anywhere in between always leaves a manifest behind. Reaching this state means
+            # either leftover data from a pre-manifest run, or something outside this code's
+            # control touched the paths — either way, there's no way to verify dest is the
+            # complete, correct replacement. Stop and surface it rather than guessing.
+            raise RuntimeError(
+                f"Ambiguous state for {date}: {len(dest_blobs)} staged file(s) in "
+                f"{self.gcs_staging_path}, no source files in {self.gcs_output_path}, and no "
+                "manifest recording a committed swap. Refusing to auto-recover — verify "
+                "manually whether the staged files are the complete replacement before "
+                "deleting or restoring anything."
+            )
+
+        if self.swap and dest_blobs and source_blobs:
+            # Originals are still present and no manifest was recorded, so the
+            # delete-of-originals step never started. Any staging output here is leftover
+            # from an interrupted compaction attempt — safe to discard and recompact.
+            logger.warning(
+                f"Clearing {len(dest_blobs)} stale staged file(s) for {date} "
+                "(interrupted compaction attempt)"
+            )
+            self._delete_blobs(dest_blobs)
+            dest_blobs = []
 
         if not source_blobs:
             logger.info(f"No source files for {date}, skipping")
@@ -187,7 +222,7 @@ class Compactor:
             logger.info(f"Skipping {date}: already a single file")
             return
 
-        if dest_blobs:
+        if not self.swap and dest_blobs:
             logger.info(f"Removing {len(dest_blobs)} existing file(s) from dest for {date}")
             self._delete_blobs(dest_blobs)
 
@@ -204,13 +239,13 @@ class Compactor:
         logger.info(f"DuckDB done in {time.monotonic() - t0:.1f}s — {len(written)} file(s)")
 
         if self.swap:
-            # Originals are deleted before the copy so we never have duplicate data visible
-            # to the external table. The staging files serve as the recovery point if the
-            # copy step is interrupted.
+            # The manifest is written before anything is deleted, so its existence is what
+            # tells a resumed run that staging already holds a verified, complete replacement
+            # — independent of how much of the delete loop below actually completed.
             t0 = time.monotonic()
-            self._delete_blobs(source_blobs)
-            self._copy_to_partition(date, written, self.gcs_output_path)
-            self._delete_blobs(written)
+            names = [b.name for b in source_blobs]
+            self._write_manifest(date, names)
+            self._finish_swap(date, names, written)
             logger.info(f"Swap done in {time.monotonic() - t0:.1f}s")
 
     def _write_compacted(
@@ -246,6 +281,52 @@ class Compactor:
         for blob in blobs:
             blob.delete()
             logger.info(f"Deleted gs://{blob.bucket.name}/{blob.name}")
+
+    def _delete_named_blobs(self, base: GSPath, names: list[str]) -> None:
+        bucket = self.gcs_client.bucket(base.bucket)
+        for name in names:
+            try:
+                bucket.blob(name).delete()
+                logger.info(f"Deleted gs://{base.bucket}/{name}")
+            except NotFound:
+                logger.info(f"Already deleted gs://{base.bucket}/{name}")
+
+    def _finish_swap(
+        self, date: datetime.date, original_names: list[str], staged_blobs: list[storage.Blob]
+    ) -> None:
+        """Delete originals, copy staged output into place, and clear the manifest.
+
+        Shared by both a fresh compaction and a manifest-driven resume: every step here
+        is idempotent (deleting an already-gone original, re-copying an already-copied
+        file, deleting an already-gone manifest all no-op), so re-running this from the
+        top after any partial failure is always safe.
+        """
+        self._delete_named_blobs(self.gcs_output_path, original_names)
+        self._copy_to_partition(date, staged_blobs, self.gcs_output_path)
+        self._delete_blobs(staged_blobs)
+        self._delete_manifest(date)
+
+    def _manifest_blob(self, date: datetime.date) -> storage.Blob:
+        part = self._partition_path(self.gcs_staging_path, date)
+        bucket = self.gcs_client.bucket(part.bucket)
+        return bucket.blob(f"{part.blob}/{_MANIFEST_NAME}")
+
+    def _read_manifest(self, date: datetime.date) -> Optional[list[str]]:
+        blob = self._manifest_blob(date)
+        if not blob.exists():
+            return None
+        return list(json.loads(blob.download_as_text()))
+
+    def _write_manifest(self, date: datetime.date, names: list[str]) -> None:
+        blob = self._manifest_blob(date)
+        blob.upload_from_string(json.dumps(names), content_type="application/json")
+
+    def _delete_manifest(self, date: datetime.date) -> None:
+        blob = self._manifest_blob(date)
+        try:
+            blob.delete()
+        except NotFound:
+            pass
 
 
 def run(
