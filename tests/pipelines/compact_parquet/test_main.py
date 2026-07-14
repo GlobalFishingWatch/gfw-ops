@@ -74,7 +74,7 @@ def _make_compactor(
 
     return Compactor(
         gcs_client=mock_gcs,
-        gcs_output_path=GCS_PATH,
+        gcs_input_path=GCS_PATH,
         event_source="src",
         partition_prefix="event_",
         target_file_size_mb=512,
@@ -413,7 +413,7 @@ def test_run_dry_run_makes_no_gcs_calls():
     mock_gcs = MagicMock()
     run(
         project="proj",
-        gcs_output_path="gs://bucket/messages",
+        gcs_input_path="gs://bucket/messages",
         event_source="src",
         start_date="2024-01-01",
         end_date="2024-01-02",
@@ -433,7 +433,7 @@ def test_run_function_runs_compactor():
 
     run(
         project="proj",
-        gcs_output_path="gs://bucket/messages",
+        gcs_input_path="gs://bucket/messages",
         event_source="src",
         start_date="2024-01-01",
         end_date="2024-01-02",

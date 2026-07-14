@@ -95,7 +95,7 @@ class Compactor:
     """
 
     gcs_client: storage.Client
-    gcs_output_path: GSPath
+    gcs_input_path: GSPath
     event_source: str
     partition_prefix: str
     target_file_size_mb: int
@@ -131,7 +131,7 @@ class Compactor:
 
     @property
     def default_staging_path(self) -> GSPath:
-        return self.gcs_output_path.parent / f"_compact_{self.gcs_output_path.name}_staging"
+        return self.gcs_input_path.parent / f"_compact_{self.gcs_input_path.name}_staging"
 
     def run(self, dates: list[datetime.date]) -> None:
         """Compact each date partition, resuming any interrupted swaps first."""
@@ -174,7 +174,7 @@ class Compactor:
 
     def _compact(self, date: datetime.date) -> None:
         manifest = self._read_manifest(date) if self.swap else None
-        source_blobs = self._list_parquet_blobs(self.gcs_output_path, date)
+        source_blobs = self._list_parquet_blobs(self.gcs_input_path, date)
         dest_blobs = self._list_parquet_blobs(self.gcs_staging_path, date)
 
         if manifest is not None:
@@ -197,7 +197,7 @@ class Compactor:
             # complete, correct replacement. Stop and surface it rather than guessing.
             raise RuntimeError(
                 f"Ambiguous state for {date}: {len(dest_blobs)} staged file(s) in "
-                f"{self.gcs_staging_path}, no source files in {self.gcs_output_path}, and no "
+                f"{self.gcs_staging_path}, no source files in {self.gcs_input_path}, and no "
                 "manifest recording a committed swap. Refusing to auto-recover — verify "
                 "manually whether the staged files are the complete replacement before "
                 "deleting or restoring anything."
@@ -226,7 +226,7 @@ class Compactor:
             logger.info(f"Removing {len(dest_blobs)} existing file(s) from dest for {date}")
             self._delete_blobs(dest_blobs)
 
-        source_part = self._partition_path(self.gcs_output_path, date)
+        source_part = self._partition_path(self.gcs_input_path, date)
         source_uris = [f"gs://{source_part.bucket}/{b.name}" for b in source_blobs]
         total_mb = sum(b.size for b in source_blobs) / _MB
 
@@ -301,8 +301,8 @@ class Compactor:
         file, deleting an already-gone manifest all no-op), so re-running this from the
         top after any partial failure is always safe.
         """
-        self._delete_named_blobs(self.gcs_output_path, original_names)
-        self._copy_to_partition(date, staged_blobs, self.gcs_output_path)
+        self._delete_named_blobs(self.gcs_input_path, original_names)
+        self._copy_to_partition(date, staged_blobs, self.gcs_input_path)
         self._delete_blobs(staged_blobs)
         self._delete_manifest(date)
 
@@ -331,7 +331,7 @@ class Compactor:
 
 def run(
     project: str,
-    gcs_output_path: str,
+    gcs_input_path: str,
     event_source: str,
     start_date: str,
     end_date: str,
@@ -358,7 +358,7 @@ def run(
 
     Path structure::
 
-        {gcs_output_path}/{prefix}source={event_source}/{prefix}date=YYYY-MM-DD/*.parquet
+        {gcs_input_path}/{prefix}source={event_source}/{prefix}date=YYYY-MM-DD/*.parquet
 
     Staging path: ``gs://{bucket}/{parent}/_compact_{table}_staging``
     (sibling of the table directory, same bucket so copies are server-side).
@@ -367,7 +367,7 @@ def run(
         project:
             GCP project used for billing.
 
-        gcs_output_path:
+        gcs_input_path:
             GCS path prefix (gs://bucket/path) of the hive-partitioned files.
 
         event_source:
@@ -409,21 +409,21 @@ def run(
         unknown_parsed_args:
             Extra parsed args (ignored).
     """
-    source = GSPath(gcs_output_path.rstrip("/"))
+    source = GSPath(gcs_input_path.rstrip("/"))
     dates = _date_range(start_date, end_date)
 
-    logger.info(f"Compacting {gcs_output_path} for [{start_date}, {end_date}) ({len(dates)} days)")
+    logger.info(f"Compacting {gcs_input_path} for [{start_date}, {end_date}) ({len(dates)} days)")
 
     if dry_run:
         for date in dates:
             p = partition_prefix
-            logger.info(f"[dry-run] {gcs_output_path}/{p}source={event_source}/{p}date={date}")
+            logger.info(f"[dry-run] {gcs_input_path}/{p}source={event_source}/{p}date={date}")
         return
 
     gcs_client = gcs_client_factory(project=project)
     compactor = Compactor(
         gcs_client=gcs_client,
-        gcs_output_path=source,
+        gcs_input_path=source,
         event_source=event_source,
         partition_prefix=partition_prefix,
         target_file_size_mb=target_file_size_mb,
