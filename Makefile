@@ -18,7 +18,7 @@ UV_VERSION := 0.10.9
 
 VENV:=uv venv
 PIP:=uv pip
-PIP_COMPILE:=uv pip compile --prerelease=allow
+PIP_COMPILE:=uv pip compile
 
 
 
@@ -81,7 +81,7 @@ install-test: upgrade-pip
 
 .PHONY: install  ## Install the package in editable mode & all dependencies for local development.
 install: upgrade-pip
-	${PIP} install --prerelease=allow -e .[lint,dev,build]
+	${PIP} install -e .[lint,dev,build]
 	make install-test
 
 .PHONY: test  ## Run all unit tests exporting coverage.xml report.
