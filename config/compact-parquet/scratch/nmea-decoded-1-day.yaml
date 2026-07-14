@@ -1,4 +1,4 @@
-gcs_output_path: gs://engineering-development-ttl30/tomas.link/parquet-migration/messages/
+gcs_input_path: gs://engineering-development-ttl30/tomas.link/parquet-migration/messages/
 gcs_staging_path: gs://engineering-development-ttl30/tomas.link/parquet-migration/_compacted_messages/
 event_source: wf827-pipe-nmea-parsed
 start_date: "2023-01-01"

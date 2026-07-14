@@ -12,7 +12,7 @@ from gfw.ops.pipelines import compact_parquet as pipeline
 _DESCRIPTION = "Compacts small hive-partitioned Parquet files on GCS in-place into larger files."
 
 HELP_PROJECT = "GCP project for billing."
-HELP_GCS_OUTPUT_PATH = "GCS path prefix (gs://bucket/path) of the hive-partitioned files."
+HELP_GCS_INPUT_PATH = "GCS path prefix (gs://bucket/path) of the hive-partitioned files."
 HELP_EVENT_SOURCE = "Value for the {prefix}source hive partition key."
 HELP_START_DATE = "Start date to compact, inclusive (YYYY-MM-DD)."
 HELP_END_DATE = "End date to compact, exclusive (YYYY-MM-DD)."
@@ -47,7 +47,7 @@ class CompactParquet(Command):
         """Command options."""
         return [
             Option("--project", type=str, required=True, help=HELP_PROJECT),
-            Option("--gcs-output-path", type=str, required=True, help=HELP_GCS_OUTPUT_PATH),
+            Option("--gcs-input-path", type=str, required=True, help=HELP_GCS_INPUT_PATH),
             Option("--event-source", type=str, required=True, help=HELP_EVENT_SOURCE),
             Option("--start-date", type=str, required=True, help=HELP_START_DATE),
             Option("--end-date", type=str, required=True, help=HELP_END_DATE),

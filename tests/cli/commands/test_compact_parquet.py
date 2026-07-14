@@ -11,7 +11,7 @@ def test_dry_run():
         [
             "compact-parquet",
             "--project", "proj",
-            "--gcs-output-path", "gs://bucket/messages",
+            "--gcs-input-path", "gs://bucket/messages",
             "--event-source", "src",
             "--start-date", "2024-01-01",
             "--end-date", "2024-01-02",
