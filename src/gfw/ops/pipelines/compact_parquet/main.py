@@ -17,6 +17,8 @@ from google.api_core.exceptions import NotFound
 from google.cloud import storage
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 
+from gfw.ops.pipelines.compact_parquet.units import CompactionUnit, DailyCompactionUnit
+
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,22 @@ class CompactionQuery:
 class Compactor:
     """Compacts hive-partitioned Parquet files for a given source and date range.
 
+    Source data may be hive-partitioned three levels deep, per hour
+    (``{prefix}source=/{prefix}date=/{prefix}hour=``), or just two, per day
+    (``{prefix}source=/{prefix}date=``). Whichever it is, every file under the external
+    BigQuery table's URI prefix must keep the same partition-key path structure — BigQuery
+    requires this regardless of whether that structure is auto-detected or explicitly
+    declared. So an ``{prefix}hour=`` subpartition is always preserved when one is found,
+    compacted independently with its output written back under that same folder: silently
+    collapsing it into one flat date, just because a caller's config said this
+    event_source wasn't hourly, would break the table.
+
+    ``hourly=True`` adds an assertion on top of that, for event_sources actively expected
+    to be hour-partitioned (e.g. current streaming sources, as opposed to historical data
+    predating hourly output): if a date declared ``hourly=True`` turns out to have no hour
+    subpartitions at all, that's treated as a real problem — ingestion broke, or the date
+    predates hourly output — and raised rather than silently compacted flat.
+
     When ``gcs_staging_path`` is ``None`` (the default), operates in *swap* mode: DuckDB
     writes compacted output to an auto-generated staging sibling path, the originals are
     deleted, and the staged files are moved back so the external table path never changes.
@@ -104,6 +122,7 @@ class Compactor:
     threads: int = 4
     conn_factory: Callable[..., duckdb.DuckDBPyConnection] = _duckdb_conn
     max_retries: int = 3
+    hourly: bool = False
     swap: bool = field(init=False)
 
     _connection: Optional[duckdb.DuckDBPyConnection] = field(default=None, init=False, repr=False)
@@ -134,20 +153,21 @@ class Compactor:
         return self.gcs_input_path.parent / f"_compact_{self.gcs_input_path.name}_staging"
 
     def run(self, dates: list[datetime.date]) -> None:
-        """Compact each date partition, resuming any interrupted swaps first."""
-        total = len(dates)
-        logger.info(f"Starting compaction: {total} date(s) to process")
-        for i, date in enumerate(dates, 1):
-            logger.info(f"[{i}/{total}] {date}")
-            self._compact_with_retry(date)
-        self.close_connection()
-        logger.info(f"Finished compaction: {total} date(s) processed")
+        """Compact every unit across `dates`, resuming any interrupted swaps first."""
+        units = [unit for date in dates for unit in self._units_for(date)]
 
-    def _compact_with_retry(self, date: datetime.date) -> None:
+        logger.info(f"Starting compaction: {len(units)} unit(s) to process")
+        for unit in units:
+            self._compact_with_retry(unit)
+
+        self.close_connection()
+        logger.info(f"Finished compaction: {len(units)} unit(s) processed")
+
+    def _compact_with_retry(self, unit: CompactionUnit) -> None:
         def before_sleep(retry_state: Retrying) -> None:
             logger.warning(
-                f"Attempt {retry_state.attempt_number}/{self.max_retries} failed for {date}: "
-                f"{retry_state.outcome.exception()}. Retrying..."
+                f"Attempt {retry_state.attempt_number}/{self.max_retries} failed for "
+                f"{unit}: {retry_state.outcome.exception()}. Retrying..."
             )
             self.close_connection()
 
@@ -161,42 +181,29 @@ class Compactor:
             reraise=True,
         ):
             with attempt:
-                self._compact(date)
+                self._compact(unit)
 
-    def _partition_path(self, base: GSPath, date: datetime.date) -> GSPath:
-        p = self.partition_prefix
-        return base / f"{p}source={self.event_source}" / f"{p}date={date.isoformat()}"
-
-    def _list_parquet_blobs(self, base: GSPath, date: datetime.date) -> list[storage.Blob]:
-        part = self._partition_path(base, date)
-        blobs = self.gcs_client.list_blobs(part.bucket, prefix=f"{part.blob}/")
-        return [b for b in blobs if b.name.endswith(".parquet")]
-
-    def _compact(self, date: datetime.date) -> None:
-        manifest = self._read_manifest(date) if self.swap else None
-        source_blobs = self._list_parquet_blobs(self.gcs_input_path, date)
-        dest_blobs = self._list_parquet_blobs(self.gcs_staging_path, date)
+    def _compact(self, unit: CompactionUnit) -> None:
+        manifest = self._read_manifest(unit) if self.swap else None
+        source_part = unit.path(self.gcs_input_path, self.event_source, self.partition_prefix)
+        dest_part = unit.path(self.gcs_staging_path, self.event_source, self.partition_prefix)
+        source_blobs = self._list_parquet_blobs(source_part)
+        dest_blobs = self._list_parquet_blobs(dest_part)
 
         if manifest is not None:
             # A manifest exists only once compaction fully succeeded and originals were
             # about to be deleted, so staging is guaranteed to hold the complete replacement
             # regardless of how far the delete-of-originals got before the interruption.
             logger.warning(
-                f"Resuming committed swap for {date}: finishing delete of "
+                f"Resuming committed swap for {unit}: finishing delete of "
                 f"{len(manifest)} recorded original(s) and copy-back from staging"
             )
-            self._finish_swap(date, manifest, dest_blobs)
+            self._finish_swap(unit, manifest, dest_blobs)
             return
 
         if self.swap and dest_blobs and not source_blobs:
-            # Unreachable under this code's own logic: the manifest is written before any
-            # delete starts and removed only after the swap fully completes, so a crash
-            # anywhere in between always leaves a manifest behind. Reaching this state means
-            # either leftover data from a pre-manifest run, or something outside this code's
-            # control touched the paths — either way, there's no way to verify dest is the
-            # complete, correct replacement. Stop and surface it rather than guessing.
             raise RuntimeError(
-                f"Ambiguous state for {date}: {len(dest_blobs)} staged file(s) in "
+                f"Ambiguous state for {unit}: {len(dest_blobs)} staged file(s) in "
                 f"{self.gcs_staging_path}, no source files in {self.gcs_input_path}, and no "
                 "manifest recording a committed swap. Refusing to auto-recover — verify "
                 "manually whether the staged files are the complete replacement before "
@@ -208,34 +215,33 @@ class Compactor:
             # delete-of-originals step never started. Any staging output here is leftover
             # from an interrupted compaction attempt — safe to discard and recompact.
             logger.warning(
-                f"Clearing {len(dest_blobs)} stale staged file(s) for {date} "
+                f"Clearing {len(dest_blobs)} stale staged file(s) for {unit} "
                 "(interrupted compaction attempt)"
             )
             self._delete_blobs(dest_blobs)
             dest_blobs = []
 
         if not source_blobs:
-            logger.info(f"No source files for {date}, skipping")
+            logger.info(f"No source files for {unit}, skipping")
             return
 
         if self.swap and len(source_blobs) == 1:
-            logger.info(f"Skipping {date}: already a single file")
+            logger.info(f"Skipping {unit}: already a single file")
             return
 
         if not self.swap and dest_blobs:
-            logger.info(f"Removing {len(dest_blobs)} existing file(s) from dest for {date}")
+            logger.info(f"Removing {len(dest_blobs)} existing file(s) from dest for {unit}")
             self._delete_blobs(dest_blobs)
 
-        source_part = self._partition_path(self.gcs_input_path, date)
         source_uris = [f"gs://{source_part.bucket}/{b.name}" for b in source_blobs]
         total_mb = sum(b.size for b in source_blobs) / _MB
 
         logger.info(
-            f"Compacting {len(source_uris)} file(s) for {date} ({total_mb:.0f} MB compressed)"
+            f"Compacting {len(source_uris)} file(s) for {unit} ({total_mb:.0f} MB compressed)"
         )
 
         t0 = time.monotonic()
-        written = self._write_compacted(date, source_uris, self.gcs_staging_path)
+        written = self._write_compacted(dest_part, source_uris)
         logger.info(f"DuckDB done in {time.monotonic() - t0:.1f}s — {len(written)} file(s)")
 
         if self.swap:
@@ -244,15 +250,62 @@ class Compactor:
             # — independent of how much of the delete loop below actually completed.
             t0 = time.monotonic()
             names = [b.name for b in source_blobs]
-            self._write_manifest(date, names)
-            self._finish_swap(date, names, written)
+            self._write_manifest(unit, names)
+            self._finish_swap(unit, names, written)
             logger.info(f"Swap done in {time.monotonic() - t0:.1f}s")
 
-    def _write_compacted(
-        self, date: datetime.date, source_uris: list[str], dest_path: GSPath
-    ) -> list[storage.Blob]:
-        """Compact source files into dest_path using DuckDB."""
-        dest_part = self._partition_path(dest_path, date)
+    def _units_for(self, date: datetime.date) -> list[CompactionUnit]:
+        """Return the compaction units for `date`: one per discovered hour subpartition,
+        or a single whole-date unit if there are none.
+
+        Hour subpartitions are always preserved when present, regardless of `hourly` —
+        collapsing a real {prefix}hour= partition into one flat date would break the
+        external table's hive partitioning, so that must never happen just because the
+        caller's declaration was stale or wrong. `hourly` only adds an assertion on top:
+        when set, it means this date is expected to be hour-partitioned, so finding none
+        is treated as a real problem (ingestion broke, or this date predates hourly
+        output) and raised rather than silently downgraded to flat compaction.
+        """
+        daily = DailyCompactionUnit(date)
+        hours = self._list_hours(daily)
+
+        if self.hourly and not hours:
+            raise RuntimeError(
+                f"{date} is configured as hourly=True, but found no "
+                f"{self.partition_prefix}hour= subpartitions under it. Refusing to "
+                "compact — verify whether this date predates hourly partitioning "
+                "(run with hourly=False instead) or whether ingestion for this date "
+                "actually completed."
+            )
+
+        if hours:
+            return [daily.with_hour(hour) for hour in hours]
+
+        return [daily]
+
+    def _list_hours(self, unit: DailyCompactionUnit) -> list[str]:
+        """Discover which {prefix}hour= subpartitions exist under this date partition."""
+        date_part = unit.path(self.gcs_input_path, self.event_source, self.partition_prefix)
+        iterator = self.gcs_client.list_blobs(
+            date_part.bucket, prefix=f"{date_part.blob}/", delimiter="/"
+        )
+        list(iterator)  # must be fully consumed for `.prefixes` to be populated
+
+        hour_key = f"{self.partition_prefix}hour="
+        hours = []
+        for sub_prefix in iterator.prefixes:
+            name = sub_prefix.rstrip("/").rsplit("/", 1)[-1]
+            if name.startswith(hour_key):
+                hours.append(name[len(hour_key):])
+
+        return sorted(hours)
+
+    def _list_parquet_blobs(self, partition: GSPath) -> list[storage.Blob]:
+        blobs = self.gcs_client.list_blobs(partition.bucket, prefix=f"{partition.blob}/")
+        return [b for b in blobs if b.name.endswith(".parquet")]
+
+    def _write_compacted(self, dest_part: GSPath, source_uris: list[str]) -> list[storage.Blob]:
+        """Compact source files into dest_part using DuckDB."""
         dest_dir = f"gs://{dest_part.bucket}/{dest_part.blob}"
         query = CompactionQuery(
             source_uris=source_uris,
@@ -262,14 +315,14 @@ class Compactor:
         logger.info(f"Writing compacted output to {dest_dir}")
         self.connection.execute(query.render())
 
-        written = self._list_parquet_blobs(dest_path, date)
+        written = self._list_parquet_blobs(dest_part)
         logger.info(f"Wrote {len(written)} file(s) to {dest_dir}")
         return written
 
     def _copy_to_partition(
-        self, date: datetime.date, blobs: list[storage.Blob], dest_path: GSPath
+        self, unit: CompactionUnit, blobs: list[storage.Blob], dest_path: GSPath
     ) -> None:
-        dest_part = self._partition_path(dest_path, date)
+        dest_part = unit.path(dest_path, self.event_source, self.partition_prefix)
         bucket = self.gcs_client.bucket(dest_part.bucket)
         for blob in blobs:
             filename = blob.name.rsplit("/", 1)[-1]
@@ -292,7 +345,10 @@ class Compactor:
                 logger.info(f"Already deleted gs://{base.bucket}/{name}")
 
     def _finish_swap(
-        self, date: datetime.date, original_names: list[str], staged_blobs: list[storage.Blob]
+        self,
+        unit: CompactionUnit,
+        original_names: list[str],
+        staged_blobs: list[storage.Blob],
     ) -> None:
         """Delete originals, copy staged output into place, and clear the manifest.
 
@@ -302,27 +358,27 @@ class Compactor:
         top after any partial failure is always safe.
         """
         self._delete_named_blobs(self.gcs_input_path, original_names)
-        self._copy_to_partition(date, staged_blobs, self.gcs_input_path)
+        self._copy_to_partition(unit, staged_blobs, self.gcs_input_path)
         self._delete_blobs(staged_blobs)
-        self._delete_manifest(date)
+        self._delete_manifest(unit)
 
-    def _manifest_blob(self, date: datetime.date) -> storage.Blob:
-        part = self._partition_path(self.gcs_staging_path, date)
+    def _manifest_blob(self, unit: CompactionUnit) -> storage.Blob:
+        part = unit.path(self.gcs_staging_path, self.event_source, self.partition_prefix)
         bucket = self.gcs_client.bucket(part.bucket)
         return bucket.blob(f"{part.blob}/{_MANIFEST_NAME}")
 
-    def _read_manifest(self, date: datetime.date) -> Optional[list[str]]:
-        blob = self._manifest_blob(date)
+    def _read_manifest(self, unit: CompactionUnit) -> Optional[list[str]]:
+        blob = self._manifest_blob(unit)
         if not blob.exists():
             return None
         return list(json.loads(blob.download_as_text()))
 
-    def _write_manifest(self, date: datetime.date, names: list[str]) -> None:
-        blob = self._manifest_blob(date)
+    def _write_manifest(self, unit: CompactionUnit, names: list[str]) -> None:
+        blob = self._manifest_blob(unit)
         blob.upload_from_string(json.dumps(names), content_type="application/json")
 
-    def _delete_manifest(self, date: datetime.date) -> None:
-        blob = self._manifest_blob(date)
+    def _delete_manifest(self, unit: CompactionUnit) -> None:
+        blob = self._manifest_blob(unit)
         try:
             blob.delete()
         except NotFound:
@@ -341,6 +397,7 @@ def run(
     threads: int = 4,
     max_retries: int = 3,
     gcs_staging_path: str | None = None,
+    hourly: bool = False,
     dry_run: bool = False,
     gcs_client_factory: Callable[[str], storage.Client] = storage.Client,
     conn_factory: Callable[[], duckdb.DuckDBPyConnection] | None = None,
@@ -350,15 +407,27 @@ def run(
 ) -> None:
     """Compact small hive-partitioned Parquet files on GCS into larger files.
 
-    For each date partition, DuckDB reads all source files in parallel and writes
-    compacted output to an auto-generated staging sibling path. The staged files are
-    then swapped into the original partition path so the external table path never
-    changes. If the process is interrupted after deleting originals, the next run
-    detects the staged files and resumes the copy step automatically.
+    Every ``{prefix}hour=`` partition found under a date is discovered on GCS and
+    compacted independently: DuckDB reads that hour's source files in parallel and writes
+    compacted output to an auto-generated staging sibling path. The staged files are then
+    swapped into the original hour partition path so the external table path — and its
+    partition depth — never changes. If the process is interrupted after deleting
+    originals, the next run detects the staged files and resumes the copy step
+    automatically. A date with no hour subpartitions at all is compacted as a whole
+    instead.
 
-    Path structure::
+    ``hourly`` adds an assertion on top of that: for event_sources actively expected to
+    be hour-partitioned, a date with no hour subpartitions at all is treated as a real
+    problem (ingestion broke, or the date predates hourly output) and raised rather than
+    silently compacted flat.
+
+    Path structure (flat — a date with no hour subpartitions)::
 
         {gcs_input_path}/{prefix}source={event_source}/{prefix}date=YYYY-MM-DD/*.parquet
+
+    Path structure (hourly — a date with {prefix}hour= subpartitions)::
+
+        {gcs_input_path}/{prefix}source={event_source}/{prefix}date=YYYY-MM-DD/{prefix}hour=HH/*.parquet
 
     Staging path: ``gs://{bucket}/{parent}/_compact_{table}_staging``
     (sibling of the table directory, same bucket so copies are server-side).
@@ -397,6 +466,13 @@ def run(
             files are written to this path and the source files are left untouched, giving
             you both uncompacted and compacted paths for separate external tables.
 
+        hourly:
+            Assert that this event_source's dates must have {prefix}hour= subpartitions
+            (e.g. active streaming sources, as opposed to historical data written before
+            a pipeline moved to hourly output). Hour subpartitions are always preserved
+            when found regardless of this flag — it only controls whether a date with
+            none at all is a hard failure (True) or compacted flat (False, the default).
+
         dry_run:
             Log planned compaction and exit without modifying files.
 
@@ -415,9 +491,15 @@ def run(
     logger.info(f"Compacting {gcs_input_path} for [{start_date}, {end_date}) ({len(dates)} days)")
 
     if dry_run:
+        # Whether a date compacts flat or per-hour depends on what's actually on GCS
+        # (hour subpartitions are preserved whenever found), which dry-run doesn't probe
+        # for — it makes no GCS calls at all — so both shapes are shown as possibilities.
         for date in dates:
             p = partition_prefix
-            logger.info(f"[dry-run] {gcs_input_path}/{p}source={event_source}/{p}date={date}")
+            logger.info(
+                f"[dry-run] {gcs_input_path}/{p}source={event_source}/{p}date={date}/"
+                f"(*.parquet if flat, else {p}hour=*/*.parquet)"
+            )
         return
 
     gcs_client = gcs_client_factory(project=project)
@@ -431,6 +513,7 @@ def run(
         memory_limit_gb=memory_limit_gb,
         threads=threads,
         max_retries=max_retries,
+        hourly=hourly,
         conn_factory=conn_factory or _duckdb_conn,
     )
     compactor.run(dates)

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from gfw.common.cli import Command, Option
-
 from gfw.ops.pipelines import compact_parquet as pipeline
 
 
@@ -24,6 +23,13 @@ HELP_STAGING_PATH = (
     "When omitted, operates in swap mode: compacted files are staged to an auto-generated "
     "sibling path, then swapped in-place. When set, operates in copy mode: compacted files "
     "are written to this path and source files are left untouched."
+)
+HELP_HOURLY = (
+    "Assert that this event_source's dates must have {prefix}hour= subpartitions (e.g. "
+    "active streaming sources, as opposed to historical data predating hourly output). "
+    "Hour subpartitions are always preserved when found regardless of this flag — it only "
+    "controls whether a date with none at all is a hard failure (set) or compacted flat "
+    "(omitted, the default)."
 )
 HELP_DRY_RUN = "Log planned compaction and exit without modifying files."
 HELP_MAX_RETRIES = "Number of retries on transient DuckDB I/O errors before failing the task."
@@ -56,6 +62,7 @@ class CompactParquet(Command):
             Option("--memory-limit-gb", type=int, default=12, help=HELP_MEMORY_LIMIT),
             Option("--threads", type=int, default=4, help=HELP_THREADS),
             Option("--gcs-staging-path", type=str, default=None, help=HELP_STAGING_PATH),
+            Option("--hourly", type=bool, default=False, help=HELP_HOURLY),
             Option("--dry-run", type=bool, default=False, help=HELP_DRY_RUN),
             Option("--max-retries", type=int, default=3, help=HELP_MAX_RETRIES),
         ]

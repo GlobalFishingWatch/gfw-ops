@@ -9,11 +9,29 @@ import pytest
 from cloudpathlib import GSPath
 
 from gfw.ops.pipelines.compact_parquet.main import Compactor, _date_range, _duckdb_conn, run
+from gfw.ops.pipelines.compact_parquet.units import DailyCompactionUnit, HourlyCompactionUnit
 
 
 DATE = datetime.date(2024, 1, 1)
+HOUR = "05"
+UNIT = HourlyCompactionUnit(DATE, HOUR)
+FLAT_UNIT = DailyCompactionUnit(DATE)
 GCS_PATH = GSPath("gs://bucket/path/messages")
 COPY_STAGING_PATH = GSPath("gs://bucket/path/compacted_messages")
+
+
+class _FakeIterator:
+    """Mimics a GCS HTTPIterator: iterable over blobs, with `.prefixes` populated
+    (in the real API, only after the iterator has been consumed) when a delimiter
+    listing is used for hive-subpartition discovery.
+    """
+
+    def __init__(self, blobs=(), prefixes=()):
+        self._blobs = list(blobs)
+        self.prefixes = set(prefixes)
+
+    def __iter__(self):
+        return iter(self._blobs)
 
 
 def _make_blob(name: str, size: int = 10 * 1024 * 1024) -> MagicMock:
@@ -24,14 +42,34 @@ def _make_blob(name: str, size: int = 10 * 1024 * 1024) -> MagicMock:
     return blob
 
 
-def _source_blobs(n: int = 3) -> list[MagicMock]:
+def _source_blobs(n: int = 3, hour: str = HOUR) -> list[MagicMock]:
+    return [
+        _make_blob(
+            f"path/messages/event_source=src/event_date=2024-01-01/"
+            f"event_hour={hour}/part_{i}.parquet"
+        )
+        for i in range(n)
+    ]
+
+
+def _staging_blobs(n: int = 1, hour: str = HOUR) -> list[MagicMock]:
+    return [
+        _make_blob(
+            f"path/_compact_messages_staging/event_source=src/"
+            f"event_date=2024-01-01/event_hour={hour}/part_{i}.parquet"
+        )
+        for i in range(n)
+    ]
+
+
+def _flat_source_blobs(n: int = 3) -> list[MagicMock]:
     return [
         _make_blob(f"path/messages/event_source=src/event_date=2024-01-01/part_{i}.parquet")
         for i in range(n)
     ]
 
 
-def _staging_blobs(n: int = 1) -> list[MagicMock]:
+def _flat_staging_blobs(n: int = 1) -> list[MagicMock]:
     return [
         _make_blob(
             f"path/_compact_messages_staging/event_source=src/"
@@ -47,6 +85,8 @@ def _make_compactor(
     conn_factory=None,
     gcs_staging_path=None,
     manifest=None,
+    hours=(HOUR,),
+    hourly=True,
 ) -> Compactor:
     """Return a Compactor with mocked GCS client and DuckDB connection factory.
 
@@ -54,13 +94,18 @@ def _make_compactor(
     staging-path list_blobs call. Defaults to [] (always returns empty).
     Defaults to swap mode. Pass gcs_staging_path to get copy mode.
     Pass manifest (a list of blob names) to simulate a pre-existing manifest file.
+    hours controls which {prefix}hour= subpartitions `_list_hours` discovers.
+    hourly defaults to True here (unlike Compactor's own default of False) since most
+    of these tests exercise the hourly compaction path built for hive-partitioned sources.
     """
     source_blobs = source_blobs if source_blobs is not None else _source_blobs()
     staging_iter = iter(staging_blobs_sequence or [])
 
     mock_gcs = MagicMock()
 
-    def list_blobs(bucket, prefix):
+    def list_blobs(bucket, prefix, delimiter=None):
+        if delimiter is not None:
+            return _FakeIterator(prefixes={f"{prefix}event_hour={h}/" for h in hours})
         if prefix.startswith(GCS_PATH.blob):
             return iter(source_blobs)
         return iter(next(staging_iter, []))
@@ -79,6 +124,7 @@ def _make_compactor(
         partition_prefix="event_",
         target_file_size_mb=512,
         gcs_staging_path=gcs_staging_path,
+        hourly=hourly,
         conn_factory=conn_factory or MagicMock,
     )
 
@@ -126,12 +172,12 @@ def test_date_range_empty():
 
 def test_compact_skips_when_no_source_files():
     compactor = _make_compactor(source_blobs=[])
-    compactor._compact(DATE)  # no error = no write attempted
+    compactor._compact(UNIT)  # no error = no write attempted
 
 
 def test_compact_skips_when_already_single_file():
     compactor = _make_compactor(source_blobs=_source_blobs(1))
-    compactor._compact(DATE)  # no error = no write attempted
+    compactor._compact(UNIT)  # no error = no write attempted
 
 
 # --- normal compaction flow ---
@@ -144,7 +190,7 @@ def test_compact_swap_full_flow():
     # 1st staging call (existing-check): empty; 2nd (post-write list): staged
     compactor = _make_compactor(source_blobs=source, staging_blobs_sequence=[[], staged])
 
-    compactor._compact(DATE)
+    compactor._compact(UNIT)
 
     bucket = compactor.gcs_client.bucket.return_value
     deleted_names = [
@@ -165,7 +211,7 @@ def test_compact_deletes_source_before_copy():
     bucket.blob.return_value.delete.side_effect = lambda: ops.append("delete")
     bucket.copy_blob.side_effect = lambda *a, **k: ops.append("copy")
 
-    compactor._compact(DATE)
+    compactor._compact(UNIT)
 
     assert ops.index("delete") < ops.index("copy")
 
@@ -181,7 +227,7 @@ def test_compact_raises_on_ambiguous_state_without_manifest():
     compactor = _make_compactor(source_blobs=[], staging_blobs_sequence=[staged])
 
     with pytest.raises(RuntimeError, match="Ambiguous state"):
-        compactor._compact(DATE)
+        compactor._compact(UNIT)
 
     compactor.gcs_client.bucket.return_value.copy_blob.assert_not_called()
     staged[0].delete.assert_not_called()
@@ -203,7 +249,7 @@ def test_compact_resumes_committed_swap_via_manifest():
         manifest=manifest_names,
     )
 
-    compactor._compact(DATE)
+    compactor._compact(UNIT)
 
     bucket = compactor.gcs_client.bucket.return_value
     deleted_names = [
@@ -218,7 +264,7 @@ def test_compact_resumes_committed_swap_via_manifest():
 def test_write_and_read_manifest_round_trip():
     compactor = _make_compactor()
 
-    compactor._write_manifest(DATE, ["a.parquet", "b.parquet"])
+    compactor._write_manifest(UNIT, ["a.parquet", "b.parquet"])
 
     bucket = compactor.gcs_client.bucket.return_value
     written_json = bucket.blob.return_value.upload_from_string.call_args[0][0]
@@ -227,13 +273,13 @@ def test_write_and_read_manifest_round_trip():
 
 def test_read_manifest_returns_none_when_absent():
     compactor = _make_compactor()
-    assert compactor._read_manifest(DATE) is None
+    assert compactor._read_manifest(UNIT) is None
 
 
 def test_read_manifest_returns_recorded_names():
     names = ["a.parquet", "b.parquet"]
     compactor = _make_compactor(manifest=names)
-    assert compactor._read_manifest(DATE) == names
+    assert compactor._read_manifest(UNIT) == names
 
 
 def test_delete_named_blobs_tolerates_already_deleted():
@@ -256,7 +302,7 @@ def test_delete_manifest_tolerates_already_deleted():
     bucket = compactor.gcs_client.bucket.return_value
     bucket.blob.return_value.delete.side_effect = NotFound("gone")
 
-    compactor._delete_manifest(DATE)  # no error raised
+    compactor._delete_manifest(UNIT)  # no error raised
 
 
 # --- leftover staging cleanup ---
@@ -268,7 +314,7 @@ def test_compact_cleans_up_leftover_staging_before_writing():
     # 1st staging call: leftover exists; 2nd (post-write): fresh empty result
     compactor = _make_compactor(staging_blobs_sequence=[leftover, []])
 
-    compactor._compact(DATE)
+    compactor._compact(UNIT)
 
     for blob in leftover:
         blob.delete.assert_called_once()
@@ -282,10 +328,14 @@ def test_write_compacted_executes_copy_sql():
     compactor = _make_compactor(conn_factory=MagicMock(return_value=mock_conn))
 
     source_uris = [
-        "gs://bucket/path/messages/event_source=src/event_date=2024-01-01/part_0.parquet"
+        "gs://bucket/path/messages/event_source=src/event_date=2024-01-01/"
+        "event_hour=05/part_0.parquet"
     ]
+    dest_part = UNIT.path(
+        compactor.gcs_staging_path, compactor.event_source, compactor.partition_prefix
+    )
 
-    compactor._write_compacted(DATE, source_uris, compactor.gcs_staging_path)
+    compactor._write_compacted(dest_part, source_uris)
 
     executed_sql = compactor.connection.execute.call_args[0][0]
     assert "COPY" in executed_sql
@@ -321,7 +371,7 @@ def test_compact_copy_mode_does_not_touch_source():
     source = _source_blobs(3)
     compactor = _make_compactor(source_blobs=source, gcs_staging_path=COPY_STAGING_PATH)
 
-    compactor._compact(DATE)
+    compactor._compact(UNIT)
 
     for blob in source:
         blob.delete.assert_not_called()
@@ -351,7 +401,7 @@ def test_compact_retries_on_io_error():
         conn_factory=flaky_conn,
     )
 
-    compactor._compact_with_retry(DATE)
+    compactor._compact_with_retry(UNIT)
 
     assert calls == 2
 
@@ -367,7 +417,109 @@ def test_compact_reraises_after_max_retries():
     compactor.max_retries = 2
 
     with pytest.raises(duckdb.IOException):
-        compactor._compact_with_retry(DATE)
+        compactor._compact_with_retry(UNIT)
+
+
+# --- CompactionUnit.path() ---
+
+
+def test_daily_compaction_unit_path_has_no_hour_segment():
+    unit = DailyCompactionUnit(DATE)
+    path = unit.path(GCS_PATH, "src", "event_")
+    assert str(path) == "gs://bucket/path/messages/event_source=src/event_date=2024-01-01"
+
+
+def test_hourly_compaction_unit_path_appends_hour_segment():
+    unit = HourlyCompactionUnit(DATE, HOUR)
+    path = unit.path(GCS_PATH, "src", "event_")
+    assert str(path) == (
+        "gs://bucket/path/messages/event_source=src/event_date=2024-01-01/event_hour=05"
+    )
+
+
+def test_daily_compaction_unit_str_has_no_hour():
+    assert str(DailyCompactionUnit(DATE)) == "2024-01-01"
+
+
+def test_hourly_compaction_unit_str_includes_hour():
+    assert str(HourlyCompactionUnit(DATE, HOUR)) == "2024-01-01 hour=05"
+
+
+def test_daily_compaction_unit_with_hour_derives_hourly_unit_for_same_date():
+    daily = DailyCompactionUnit(DATE)
+    assert daily.with_hour(HOUR) == HourlyCompactionUnit(DATE, HOUR)
+
+
+# --- hour-partition discovery ---
+
+
+def test_list_hours_discovers_and_sorts_hour_partitions():
+    compactor = _make_compactor(hours=("12", "00", "05"))
+    assert compactor._list_hours(DailyCompactionUnit(DATE)) == ["00", "05", "12"]
+
+
+def test_list_hours_empty_when_no_hour_subpartitions():
+    compactor = _make_compactor(hours=())
+    assert compactor._list_hours(DailyCompactionUnit(DATE)) == []
+
+
+# --- hourly vs flat partitioning (declared ahead of time, not auto-detected) ---
+
+
+def test_units_for_flat_mode_returns_single_whole_date_unit():
+    """hourly=False: a date with no hour subpartitions compacts as one whole-date unit."""
+    compactor = _make_compactor(hours=(), hourly=False)
+    assert compactor._units_for(DATE) == [DailyCompactionUnit(DATE)]
+
+
+def test_units_for_preserves_hour_subpartitions_even_when_hourly_is_false():
+    """hourly is not a mode switch: hour subpartitions are always preserved when found,
+    regardless of the flag — collapsing a real hour partition just because the caller's
+    config was stale or wrong would break the external table's hive partitioning.
+    """
+    compactor = _make_compactor(hours=(HOUR,), hourly=False)
+    assert compactor._units_for(DATE) == [HourlyCompactionUnit(DATE, HOUR)]
+
+
+def test_units_for_hourly_mode_raises_when_no_hours_found():
+    """A date configured as hourly but with no hour subpartitions at all — whether it's
+    actually flat (predates a pipeline's move to hourly output) or ingestion for this
+    date simply never completed — is refused rather than silently skipped or compacted
+    at the date level: by the time compaction runs, the date is expected to be full.
+    """
+    compactor = _make_compactor(hours=(), hourly=True)
+    with pytest.raises(RuntimeError, match="hourly=True"):
+        compactor._units_for(DATE)
+
+
+def test_units_for_hourly_mode_returns_one_unit_per_hour():
+    compactor = _make_compactor(hours=("12", "00", "05"), hourly=True)
+    assert compactor._units_for(DATE) == [
+        HourlyCompactionUnit(DATE, "00"),
+        HourlyCompactionUnit(DATE, "05"),
+        HourlyCompactionUnit(DATE, "12"),
+    ]
+
+
+def test_compact_flat_unit_full_flow():
+    """A whole-date unit (no hour) compacts directly under the date partition, with no
+    event_hour= subfolder anywhere in the source or destination paths.
+    """
+    source = _flat_source_blobs(3)
+    staged = _flat_staging_blobs(1)
+    compactor = _make_compactor(
+        source_blobs=source, staging_blobs_sequence=[[], staged], hourly=False
+    )
+
+    compactor._compact(FLAT_UNIT)
+
+    bucket = compactor.gcs_client.bucket.return_value
+    deleted_names = [
+        call.args[0] for call in bucket.blob.call_args_list if not call.args[0].endswith(".json")
+    ]
+    assert set(deleted_names) == {b.name for b in source}
+    staged[0].delete.assert_called_once()
+    bucket.copy_blob.assert_called_once()
 
 
 # --- Compactor.run() ---
@@ -382,17 +534,66 @@ def test_run_processes_all_dates():
     assert any("2024-01-02" in p for p in prefixes)
 
 
+def test_run_compacts_each_discovered_hour_independently():
+    """Each discovered {prefix}hour= subpartition is compacted on its own, not merged
+    together — this is what keeps partition depth uniform for the external table's
+    hive partitioning.
+    """
+    hours = ("00", "05", "12")
+    sources = {h: _source_blobs(3, hour=h) for h in hours}
+    staged = {h: _staging_blobs(1, hour=h) for h in hours}
+    dest_call_counts = dict.fromkeys(hours, 0)
+
+    mock_gcs = MagicMock()
+
+    def list_blobs(bucket, prefix, delimiter=None):
+        if delimiter is not None:
+            return _FakeIterator(prefixes={f"{prefix}event_hour={h}/" for h in hours})
+        for h in hours:
+            if f"event_hour={h}/" in prefix:
+                if prefix.startswith(GCS_PATH.blob):
+                    return iter(sources[h])
+                # 1st call per hour is the pre-write existing-dest check (empty);
+                # 2nd is the post-write listing (the freshly compacted output).
+                dest_call_counts[h] += 1
+                return iter([]) if dest_call_counts[h] == 1 else iter(staged[h])
+        return iter([])
+
+    mock_gcs.list_blobs.side_effect = list_blobs
+    mock_gcs.bucket.return_value.blob.return_value.exists.return_value = False
+
+    mock_conn = MagicMock()
+    compactor = Compactor(
+        gcs_client=mock_gcs,
+        gcs_input_path=GCS_PATH,
+        event_source="src",
+        partition_prefix="event_",
+        target_file_size_mb=512,
+        hourly=True,
+        conn_factory=MagicMock(return_value=mock_conn),
+    )
+
+    compactor.run([DATE])
+
+    assert mock_conn.execute.call_count == len(hours)
+    mock_conn.close.assert_called_once()
+
+
 # --- _copy_to_partition and _delete_blobs ---
 
 
 def test_copy_to_partition_calls_gcs_copy():
     compactor = _make_compactor()
-    blob = _make_blob("path/messages/event_source=src/event_date=2024-01-01/part_0.parquet")
+    blob = _make_blob(
+        "path/messages/event_source=src/event_date=2024-01-01/event_hour=05/part_0.parquet"
+    )
 
-    compactor._copy_to_partition(DATE, [blob], GCS_PATH)
+    compactor._copy_to_partition(UNIT, [blob], GCS_PATH)
 
     bucket = compactor.gcs_client.bucket.return_value
-    expected_dest = "path/messages/event_source=src/event_date=2024-01-01/part_0.parquet"
+    expected_dest = (
+        "path/messages/event_source=src/event_date=2024-01-01/event_hour=05/part_0.parquet"
+    )
     bucket.copy_blob.assert_called_once_with(blob, bucket, new_name=expected_dest)
 
 
@@ -428,7 +629,7 @@ def test_run_dry_run_makes_no_gcs_calls():
 
 def test_run_function_runs_compactor():
     mock_gcs = MagicMock()
-    mock_gcs.list_blobs.return_value = iter([])
+    mock_gcs.list_blobs.return_value = _FakeIterator()  # flat mode (default), no data found
     mock_gcs.bucket.return_value.blob.return_value.exists.return_value = False
 
     run(
