@@ -1,10 +1,10 @@
-gcs_input_path: gs://engineering-development-ttl30/tomas.link/parquet-migration/messages/
-gcs_staging_path: gs://engineering-development-ttl30/tomas.link/parquet-migration/_compacted_messages/
-event_source: wf827-pipe-nmea-parsed
-start_date: "2023-01-01"
-end_date: "2023-01-02"
+gcs_input_path: gs://engineering-development-ttl30/tomas.link/compact-parquet-test/messages/
+gcs_staging_path: gs://engineering-development-ttl30/tomas.link/compact-parquet-test/messages/_compacted_messages/
+event_source: kpler
+start_date: "2026-07-16"
+end_date: "2026-07-17"
 project: world-fishing-827
 partition_prefix: event_
 target_file_size_mb: 512
-# staging_path defaults to gs://engineering-development-ttl30/tomas.link/parquet-migration/_compact_messages_staging
+hourly: True
 dry_run: false
