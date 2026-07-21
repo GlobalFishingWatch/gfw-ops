@@ -1,6 +1,7 @@
 import datetime
 import json
 
+from functools import partial
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -8,7 +9,13 @@ import pytest
 
 from cloudpathlib import GSPath
 
-from gfw.ops.pipelines.compact_parquet.main import Compactor, _date_range, _duckdb_conn, run
+from gfw.ops.pipelines.compact_parquet.main import (
+    Compactor,
+    _date_range,
+    _duckdb_conn,
+    _httpfs_duckdb_conn,
+    run,
+)
 from gfw.ops.pipelines.compact_parquet.units import DailyCompactionUnit, HourlyCompactionUnit
 
 
@@ -151,6 +158,37 @@ def test_duckdb_conn_configures_connection():
     mock_conn.register_filesystem.assert_called_once_with(mock_fs.return_value)
 
 
+# --- _httpfs_duckdb_conn ---
+
+
+def test_httpfs_duckdb_conn_configures_connection():
+    mock_conn = MagicMock()
+    with patch(
+        "gfw.ops.pipelines.compact_parquet.main.duckdb.connect", return_value=mock_conn
+    ) as mock_connect:
+        conn = _httpfs_duckdb_conn(
+            key_id="AKIAKEY", secret="shh-secret", memory_limit=4, threads=2
+        )
+
+    assert conn is mock_conn
+    mock_connect.assert_called_once_with(
+        config={
+            "memory_limit": "4GB",
+            "threads": 2,
+            "preserve_insertion_order": False,
+            "http_timeout": 300000,
+            "http_retries": 5,
+        }
+    )
+    mock_conn.install_extension.assert_called_once_with("httpfs")
+    mock_conn.load_extension.assert_called_once_with("httpfs")
+    secret_stmt = mock_conn.execute.call_args[0][0]
+    assert "CREATE SECRET" in secret_stmt
+    assert "AKIAKEY" in secret_stmt
+    assert "shh-secret" in secret_stmt
+    assert "TYPE gcs" in secret_stmt
+
+
 # --- _date_range ---
 
 
@@ -172,12 +210,12 @@ def test_date_range_empty():
 
 def test_compact_skips_when_no_source_files():
     compactor = _make_compactor(source_blobs=[])
-    compactor._compact(UNIT)  # no error = no write attempted
+    compactor._compact(UNIT, MagicMock())  # no error = no write attempted
 
 
 def test_compact_skips_when_already_single_file():
     compactor = _make_compactor(source_blobs=_source_blobs(1))
-    compactor._compact(UNIT)  # no error = no write attempted
+    compactor._compact(UNIT, MagicMock())  # no error = no write attempted
 
 
 # --- normal compaction flow ---
@@ -190,7 +228,7 @@ def test_compact_swap_full_flow():
     # 1st staging call (existing-check): empty; 2nd (post-write list): staged
     compactor = _make_compactor(source_blobs=source, staging_blobs_sequence=[[], staged])
 
-    compactor._compact(UNIT)
+    compactor._compact(UNIT, MagicMock())
 
     bucket = compactor.gcs_client.bucket.return_value
     deleted_names = [
@@ -211,7 +249,7 @@ def test_compact_deletes_source_before_copy():
     bucket.blob.return_value.delete.side_effect = lambda: ops.append("delete")
     bucket.copy_blob.side_effect = lambda *a, **k: ops.append("copy")
 
-    compactor._compact(UNIT)
+    compactor._compact(UNIT, MagicMock())
 
     assert ops.index("delete") < ops.index("copy")
 
@@ -227,7 +265,7 @@ def test_compact_raises_on_ambiguous_state_without_manifest():
     compactor = _make_compactor(source_blobs=[], staging_blobs_sequence=[staged])
 
     with pytest.raises(RuntimeError, match="Ambiguous state"):
-        compactor._compact(UNIT)
+        compactor._compact(UNIT, MagicMock())
 
     compactor.gcs_client.bucket.return_value.copy_blob.assert_not_called()
     staged[0].delete.assert_not_called()
@@ -248,8 +286,9 @@ def test_compact_resumes_committed_swap_via_manifest():
         staging_blobs_sequence=[staged],
         manifest=manifest_names,
     )
+    mock_connection = MagicMock()
 
-    compactor._compact(UNIT)
+    compactor._compact(UNIT, mock_connection)
 
     bucket = compactor.gcs_client.bucket.return_value
     deleted_names = [
@@ -258,7 +297,7 @@ def test_compact_resumes_committed_swap_via_manifest():
     assert set(deleted_names) == set(manifest_names)
     bucket.copy_blob.assert_called_once()
     staged[0].delete.assert_called_once()
-    assert compactor._connection is None  # never recompacted the surviving remnant
+    mock_connection.execute.assert_not_called()  # never recompacted the surviving remnant
 
 
 def test_write_and_read_manifest_round_trip():
@@ -314,7 +353,7 @@ def test_compact_cleans_up_leftover_staging_before_writing():
     # 1st staging call: leftover exists; 2nd (post-write): fresh empty result
     compactor = _make_compactor(staging_blobs_sequence=[leftover, []])
 
-    compactor._compact(UNIT)
+    compactor._compact(UNIT, MagicMock())
 
     for blob in leftover:
         blob.delete.assert_called_once()
@@ -335,9 +374,9 @@ def test_write_compacted_executes_copy_sql():
         compactor.gcs_staging_path, compactor.event_source, compactor.partition_prefix
     )
 
-    compactor._write_compacted(dest_part, source_uris)
+    compactor._write_compacted(mock_conn, dest_part, source_uris)
 
-    executed_sql = compactor.connection.execute.call_args[0][0]
+    executed_sql = mock_conn.execute.call_args[0][0]
     assert "COPY" in executed_sql
     assert "FORMAT PARQUET" in executed_sql
     assert "COMPRESSION SNAPPY" in executed_sql
@@ -350,11 +389,6 @@ def test_run_closes_connection():
     compactor = _make_compactor(conn_factory=MagicMock(return_value=mock_conn))
     compactor.run([DATE])
     mock_conn.close.assert_called_once()
-
-
-def test_close_connection_noop_if_never_opened():
-    compactor = _make_compactor()
-    compactor.close_connection()  # no error, no connection created
 
 
 # --- copy mode ---
@@ -371,7 +405,7 @@ def test_compact_copy_mode_does_not_touch_source():
     source = _source_blobs(3)
     compactor = _make_compactor(source_blobs=source, gcs_staging_path=COPY_STAGING_PATH)
 
-    compactor._compact(UNIT)
+    compactor._compact(UNIT, MagicMock())
 
     for blob in source:
         blob.delete.assert_not_called()
@@ -401,7 +435,7 @@ def test_compact_retries_on_io_error():
         conn_factory=flaky_conn,
     )
 
-    compactor._compact_with_retry(UNIT)
+    compactor._compact_unit(UNIT)
 
     assert calls == 2
 
@@ -417,7 +451,7 @@ def test_compact_reraises_after_max_retries():
     compactor.max_retries = 2
 
     with pytest.raises(duckdb.IOException):
-        compactor._compact_with_retry(UNIT)
+        compactor._compact_unit(UNIT)
 
 
 # --- CompactionUnit.path() ---
@@ -473,7 +507,7 @@ def test_units_for_flat_mode_returns_single_whole_date_unit():
 
 
 def test_units_for_preserves_hour_subpartitions_even_when_hourly_is_false():
-    """hourly is not a mode switch: hour subpartitions are always preserved when found,
+    """Hourly is not a mode switch: hour subpartitions are always preserved when found,
     regardless of the flag — collapsing a real hour partition just because the caller's
     config was stale or wrong would break the external table's hive partitioning.
     """
@@ -511,7 +545,7 @@ def test_compact_flat_unit_full_flow():
         source_blobs=source, staging_blobs_sequence=[[], staged], hourly=False
     )
 
-    compactor._compact(FLAT_UNIT)
+    compactor._compact(FLAT_UNIT, MagicMock())
 
     bucket = compactor.gcs_client.bucket.return_value
     deleted_names = [
@@ -576,7 +610,61 @@ def test_run_compacts_each_discovered_hour_independently():
     compactor.run([DATE])
 
     assert mock_conn.execute.call_count == len(hours)
-    mock_conn.close.assert_called_once()
+    # Each unit gets and closes its own connection (via the shared MagicMock factory,
+    # which returns the same mock instance every call, so this asserts once-per-unit).
+    assert mock_conn.close.call_count == len(hours)
+
+
+def test_run_parallel_gives_each_unit_its_own_independent_connection():
+    """max_workers > 1 processes multiple units concurrently, each getting its own
+    connection from conn_factory — never sharing one across units, since a
+    retry-driven reconnect for one unit must never affect another running alongside it.
+    """
+    hours = ("00", "05", "12")
+    sources = {h: _source_blobs(3, hour=h) for h in hours}
+    staged = {h: _staging_blobs(1, hour=h) for h in hours}
+    dest_call_counts = dict.fromkeys(hours, 0)
+
+    mock_gcs = MagicMock()
+
+    def list_blobs(bucket, prefix, delimiter=None):
+        if delimiter is not None:
+            return _FakeIterator(prefixes={f"{prefix}event_hour={h}/" for h in hours})
+        for h in hours:
+            if f"event_hour={h}/" in prefix:
+                if prefix.startswith(GCS_PATH.blob):
+                    return iter(sources[h])
+                dest_call_counts[h] += 1
+                return iter([]) if dest_call_counts[h] == 1 else iter(staged[h])
+        return iter([])
+
+    mock_gcs.list_blobs.side_effect = list_blobs
+    mock_gcs.bucket.return_value.blob.return_value.exists.return_value = False
+
+    created_connections = []
+
+    def conn_factory(**kwargs):
+        conn = MagicMock()
+        created_connections.append(conn)
+        return conn
+
+    compactor = Compactor(
+        gcs_client=mock_gcs,
+        gcs_input_path=GCS_PATH,
+        event_source="src",
+        partition_prefix="event_",
+        target_file_size_mb=512,
+        hourly=True,
+        max_workers=3,
+        conn_factory=conn_factory,
+    )
+
+    compactor.run([DATE])
+
+    assert len(created_connections) == len(hours)  # one independent connection per unit
+    for conn in created_connections:
+        conn.execute.assert_called_once()
+        conn.close.assert_called_once()
 
 
 # --- _copy_to_partition and _delete_blobs ---
@@ -643,3 +731,67 @@ def test_run_function_runs_compactor():
     )
 
     mock_gcs.list_blobs.assert_called()
+
+
+# --- run() HMAC / conn_factory selection ---
+
+
+def test_run_raises_when_only_one_hmac_value_given():
+    with pytest.raises(ValueError, match="hmac_key_id and hmac_secret"):
+        run(
+            project="proj",
+            gcs_input_path="gs://bucket/messages",
+            event_source="src",
+            start_date="2024-01-01",
+            end_date="2024-01-02",
+            hmac_key_id="only-key-id",
+            gcs_client_factory=lambda project: MagicMock(),
+        )
+
+
+def test_run_defaults_to_gcsfs_conn_factory_when_no_hmac():
+    with patch("gfw.ops.pipelines.compact_parquet.main.Compactor") as mock_compactor_cls:
+        run(
+            project="proj",
+            gcs_input_path="gs://bucket/messages",
+            event_source="src",
+            start_date="2024-01-01",
+            end_date="2024-01-02",
+            gcs_client_factory=lambda project: MagicMock(),
+        )
+
+    assert mock_compactor_cls.call_args.kwargs["conn_factory"] is _duckdb_conn
+
+
+def test_run_builds_httpfs_conn_factory_when_hmac_given():
+    with patch("gfw.ops.pipelines.compact_parquet.main.Compactor") as mock_compactor_cls:
+        run(
+            project="proj",
+            gcs_input_path="gs://bucket/messages",
+            event_source="src",
+            start_date="2024-01-01",
+            end_date="2024-01-02",
+            hmac_key_id="my-key-id",
+            hmac_secret="my-secret",
+            gcs_client_factory=lambda project: MagicMock(),
+        )
+
+    conn_factory = mock_compactor_cls.call_args.kwargs["conn_factory"]
+    assert isinstance(conn_factory, partial)
+    assert conn_factory.func is _httpfs_duckdb_conn
+    assert conn_factory.keywords == {"key_id": "my-key-id", "secret": "my-secret"}
+
+
+def test_run_passes_max_workers_to_compactor():
+    with patch("gfw.ops.pipelines.compact_parquet.main.Compactor") as mock_compactor_cls:
+        run(
+            project="proj",
+            gcs_input_path="gs://bucket/messages",
+            event_source="src",
+            start_date="2024-01-01",
+            end_date="2024-01-02",
+            max_workers=5,
+            gcs_client_factory=lambda project: MagicMock(),
+        )
+
+    assert mock_compactor_cls.call_args.kwargs["max_workers"] == 5

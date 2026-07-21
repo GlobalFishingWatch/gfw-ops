@@ -33,6 +33,18 @@ HELP_HOURLY = (
 )
 HELP_DRY_RUN = "Log planned compaction and exit without modifying files."
 HELP_MAX_RETRIES = "Number of retries on transient DuckDB I/O errors before failing the task."
+HELP_MAX_WORKERS = (
+    "Number of units (dates or hour subpartitions) to compact concurrently. Defaults to 1 "
+    "(sequential). Units are fully independent, so this is safe to raise; each gets its "
+    "own DuckDB connection."
+)
+HELP_HMAC_KEY_ID = (
+    "Set together with --hmac-secret to use DuckDB's native httpfs GCS support "
+    "(HMAC-authenticated) instead of gcsfs — measured ~2-5x faster for this workload, at "
+    "the cost of a static credential instead of ambient application default credentials. "
+    "Omit both (the default) to keep using gcsfs."
+)
+HELP_HMAC_SECRET = "Set together with --hmac-key-id. See --hmac-key-id for details."
 
 
 class CompactParquet(Command):
@@ -65,6 +77,9 @@ class CompactParquet(Command):
             Option("--hourly", type=bool, default=False, help=HELP_HOURLY),
             Option("--dry-run", type=bool, default=False, help=HELP_DRY_RUN),
             Option("--max-retries", type=int, default=3, help=HELP_MAX_RETRIES),
+            Option("--max-workers", type=int, default=1, help=HELP_MAX_WORKERS),
+            Option("--hmac-key-id", type=str, default=None, help=HELP_HMAC_KEY_ID),
+            Option("--hmac-secret", type=str, default=None, help=HELP_HMAC_SECRET),
         ]
 
     def run(self, config: SimpleNamespace, **kwargs: Any) -> None:

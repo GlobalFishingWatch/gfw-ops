@@ -6,7 +6,9 @@ import json
 import logging
 import time
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable, Optional
 
 import duckdb
@@ -46,6 +48,43 @@ def _duckdb_conn(memory_limit: int = 8, threads: int = 4) -> duckdb.DuckDBPyConn
         }
     )
     conn.register_filesystem(gcsfs.GCSFileSystem())
+    return conn
+
+
+def _httpfs_duckdb_conn(
+    key_id: str, secret: str, memory_limit: int = 8, threads: int = 4
+) -> duckdb.DuckDBPyConnection:
+    """Connect via DuckDB's native httpfs GCS support (HMAC-authenticated) instead of
+    gcsfs. Measured ~2-5x faster than gcsfs for this workload (many small Parquet files),
+    at the cost of needing an HMAC key instead of ambient application default credentials.
+
+    ``http_timeout`` is set generously: under concurrent load (multiple units compacting
+    at once) individual requests can legitimately take longer, and a request that's
+    merely slow shouldn't be treated the same as one that's actually stuck.
+    """
+    conn = duckdb.connect(
+        config={
+            "memory_limit": f"{memory_limit}GB",
+            "threads": threads,
+            "preserve_insertion_order": False,
+            "http_timeout": 300000,
+            "http_retries": 5,
+        }
+    )
+    conn.install_extension("httpfs")
+    conn.load_extension("httpfs")
+    # No Python-native equivalent for CREATE SECRET exists in this DuckDB version —
+    # neither the `duckdb` module nor DuckDBPyConnection expose anything secret-related,
+    # so this one has to stay a raw SQL statement.
+    conn.execute(
+        f"""
+        CREATE SECRET gcs_hmac (
+            TYPE gcs,
+            KEY_ID '{key_id}',
+            SECRET '{secret}'
+        )
+        """
+    )
     return conn
 
 
@@ -122,10 +161,9 @@ class Compactor:
     threads: int = 4
     conn_factory: Callable[..., duckdb.DuckDBPyConnection] = _duckdb_conn
     max_retries: int = 3
+    max_workers: int = 1
     hourly: bool = False
     swap: bool = field(init=False)
-
-    _connection: Optional[duckdb.DuckDBPyConnection] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.swap = False
@@ -134,56 +172,67 @@ class Compactor:
             self.swap = True
 
     @property
-    def connection(self) -> duckdb.DuckDBPyConnection:
-        if self._connection is None:
-            self._connection = self.conn_factory(
-                memory_limit=self.memory_limit_gb, threads=self.threads
-            )
-        return self._connection
-
-    def close_connection(self) -> None:
-        if self._connection is None:
-            return
-
-        self._connection.close()
-        self._connection = None
-
-    @property
     def default_staging_path(self) -> GSPath:
         return self.gcs_input_path.parent / f"_compact_{self.gcs_input_path.name}_staging"
 
     def run(self, dates: list[datetime.date]) -> None:
-        """Compact every unit across `dates`, resuming any interrupted swaps first."""
+        """Compact every unit across `dates`, resuming any interrupted swaps first.
+
+        Each unit gets its own independent DuckDB connection (opened and closed within
+        its own processing) rather than sharing one across the whole run — units are
+        fully independent (disjoint GCS paths, own manifest, own swap), and a shared
+        connection would be unsafe to parallelize: a retry-driven reconnect for one unit
+        would tear down the connection out from under any other unit using it
+        concurrently. The modest per-unit connection setup cost is negligible against
+        each unit's actual compaction time.
+        """
         units = [unit for date in dates for unit in self._units_for(date)]
 
-        logger.info(f"Starting compaction: {len(units)} unit(s) to process")
-        for unit in units:
-            self._compact_with_retry(unit)
+        logger.info(
+            f"Starting compaction: {len(units)} unit(s) to process "
+            f"(max_workers={self.max_workers})"
+        )
 
-        self.close_connection()
+        if self.max_workers <= 1:
+            for unit in units:
+                self._compact_unit(unit)
+        else:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = [executor.submit(self._compact_unit, unit) for unit in units]
+                for future in as_completed(futures):
+                    future.result()  # re-raise any exception from the worker
+
         logger.info(f"Finished compaction: {len(units)} unit(s) processed")
 
-    def _compact_with_retry(self, unit: CompactionUnit) -> None:
+    def _compact_unit(self, unit: CompactionUnit) -> None:
+        """Compact one unit end-to-end, with its own connection and its own retry loop."""
+        connection = self.conn_factory(memory_limit=self.memory_limit_gb, threads=self.threads)
+
         def before_sleep(retry_state: Retrying) -> None:
+            nonlocal connection
             logger.warning(
                 f"Attempt {retry_state.attempt_number}/{self.max_retries} failed for "
                 f"{unit}: {retry_state.outcome.exception()}. Retrying..."
             )
-            self.close_connection()
+            connection.close()
+            connection = self.conn_factory(memory_limit=self.memory_limit_gb, threads=self.threads)
 
-        for attempt in Retrying(
-            # InvalidInputException covers Snappy decompression failures from partial GCS reads,
-            # which DuckDB surfaces as a parse/input error rather than an I/O error. Confirmed
-            # transient: retrying the same date succeeds.
-            retry=retry_if_exception_type((duckdb.IOException, duckdb.InvalidInputException)),
-            stop=stop_after_attempt(self.max_retries),
-            before_sleep=before_sleep,
-            reraise=True,
-        ):
-            with attempt:
-                self._compact(unit)
+        try:
+            for attempt in Retrying(
+                # InvalidInputException covers Snappy decompression failures from partial
+                # GCS reads, which DuckDB surfaces as a parse/input error rather than an
+                # I/O error. Confirmed transient: retrying the same date succeeds.
+                retry=retry_if_exception_type((duckdb.IOException, duckdb.InvalidInputException)),
+                stop=stop_after_attempt(self.max_retries),
+                before_sleep=before_sleep,
+                reraise=True,
+            ):
+                with attempt:
+                    self._compact(unit, connection)
+        finally:
+            connection.close()
 
-    def _compact(self, unit: CompactionUnit) -> None:
+    def _compact(self, unit: CompactionUnit, connection: duckdb.DuckDBPyConnection) -> None:
         manifest = self._read_manifest(unit) if self.swap else None
         source_part = unit.path(self.gcs_input_path, self.event_source, self.partition_prefix)
         dest_part = unit.path(self.gcs_staging_path, self.event_source, self.partition_prefix)
@@ -241,7 +290,7 @@ class Compactor:
         )
 
         t0 = time.monotonic()
-        written = self._write_compacted(dest_part, source_uris)
+        written = self._write_compacted(connection, dest_part, source_uris)
         logger.info(f"DuckDB done in {time.monotonic() - t0:.1f}s — {len(written)} file(s)")
 
         if self.swap:
@@ -304,7 +353,9 @@ class Compactor:
         blobs = self.gcs_client.list_blobs(partition.bucket, prefix=f"{partition.blob}/")
         return [b for b in blobs if b.name.endswith(".parquet")]
 
-    def _write_compacted(self, dest_part: GSPath, source_uris: list[str]) -> list[storage.Blob]:
+    def _write_compacted(
+        self, connection: duckdb.DuckDBPyConnection, dest_part: GSPath, source_uris: list[str]
+    ) -> list[storage.Blob]:
         """Compact source files into dest_part using DuckDB."""
         dest_dir = f"gs://{dest_part.bucket}/{dest_part.blob}"
         query = CompactionQuery(
@@ -313,7 +364,7 @@ class Compactor:
             target_file_size_mb=self.target_file_size_mb,
         )
         logger.info(f"Writing compacted output to {dest_dir}")
-        self.connection.execute(query.render())
+        connection.execute(query.render())
 
         written = self._list_parquet_blobs(dest_part)
         logger.info(f"Wrote {len(written)} file(s) to {dest_dir}")
@@ -396,8 +447,11 @@ def run(
     memory_limit_gb: int = 8,
     threads: int = 4,
     max_retries: int = 3,
+    max_workers: int = 1,
     gcs_staging_path: str | None = None,
     hourly: bool = False,
+    hmac_key_id: str | None = None,
+    hmac_secret: str | None = None,
     dry_run: bool = False,
     gcs_client_factory: Callable[[str], storage.Client] = storage.Client,
     conn_factory: Callable[[], duckdb.DuckDBPyConnection] | None = None,
@@ -473,6 +527,19 @@ def run(
             when found regardless of this flag — it only controls whether a date with
             none at all is a hard failure (True) or compacted flat (False, the default).
 
+        max_workers:
+            Number of units (dates or hour subpartitions) to compact concurrently.
+            Defaults to 1 (sequential). Units are fully independent — disjoint GCS
+            paths, own manifest, own swap — so this is safe to raise; each gets its own
+            DuckDB connection.
+
+        hmac_key_id:
+        hmac_secret:
+            When both are set, GCS access uses DuckDB's native httpfs support
+            (HMAC-authenticated) instead of gcsfs — measured ~2-5x faster for this
+            workload, at the cost of a static credential instead of ambient application
+            default credentials. Omit both (the default) to keep using gcsfs.
+
         dry_run:
             Log planned compaction and exit without modifying files.
 
@@ -502,6 +569,18 @@ def run(
             )
         return
 
+    if bool(hmac_key_id) != bool(hmac_secret):
+        raise ValueError(
+            "hmac_key_id and hmac_secret must be set together (or both omitted to use "
+            "gcsfs) — got only one of the two."
+        )
+
+    if conn_factory is None:
+        if hmac_key_id and hmac_secret:
+            conn_factory = partial(_httpfs_duckdb_conn, key_id=hmac_key_id, secret=hmac_secret)
+        else:
+            conn_factory = _duckdb_conn
+
     gcs_client = gcs_client_factory(project=project)
     compactor = Compactor(
         gcs_client=gcs_client,
@@ -513,7 +592,8 @@ def run(
         memory_limit_gb=memory_limit_gb,
         threads=threads,
         max_retries=max_retries,
+        max_workers=max_workers,
         hourly=hourly,
-        conn_factory=conn_factory or _duckdb_conn,
+        conn_factory=conn_factory,
     )
     compactor.run(dates)
