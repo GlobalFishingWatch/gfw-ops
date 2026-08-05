@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -58,7 +59,34 @@ class Exporter:
 
     def remaining_dates(self, dates: list[datetime.date]) -> list[datetime.date]:
         exported = self.destination.existing_dates(dates)
-        return [d for d in dates if d not in exported]
+        if exported:
+            logger.info(f"{len(exported)} date(s) already exported, skipping")
+            logger.debug(f"Already exported: {sorted(exported)}")
+
+        candidates = [d for d in dates if d not in exported]
+        if not candidates:
+            logger.info("No remaining dates to export")
+            return []
+
+        with_data = self.dates_with_data(candidates)
+        for date in candidates:
+            if date not in with_data:
+                logger.info(f"Skipping {date}: no data in source")
+
+        return [d for d in candidates if d in with_data]
+
+    def dates_with_data(self, dates: list[datetime.date]) -> set[datetime.date]:
+        """Return the subset of dates that have data in the source.
+
+        Runs the query the source describes using this exporter's own BQ
+        client; the source itself performs no I/O. Assumes dates is non-empty.
+        """
+        query = self.source.dates_with_data_query(dates)
+        job_config = bigquery.QueryJobConfig(query_parameters=query.parameters)
+        rows = self.bq_client.query(query.sql, job_config=job_config).result()
+        ids = {row.date_id for row in rows if row.date_id is not None}
+
+        return {d for d in dates if d.strftime("%Y%m%d") in ids}
 
 
 def run(
@@ -105,7 +133,8 @@ def run(
 
         sharded:
             Set to ``True`` for date-sharded tables (``table_YYYYMMDD``). Each shard is
-            addressed directly. Missing shards are skipped with a warning.
+            addressed directly. Dates with no matching shard are skipped before
+            submitting any job (see Exporter.dates_with_data()).
 
         partition_prefix:
             Prefix applied to partition key names in the hive output path.
@@ -162,6 +191,4 @@ def run(
             "Retrying this task will skip already-exported dates and resume from the failures."
         )
 
-    logger.info(
-        f"Done: {len(results.succeeded)} exported, {len(results.skipped)} skipped (not found)"
-    )
+    logger.info(f"Done: {len(results.succeeded)} exported")
