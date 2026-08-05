@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import datetime
 import logging
-from dataclasses import dataclass, field
-from enum import auto, StrEnum
 
-from google.api_core.exceptions import NotFound
+from dataclasses import dataclass, field
+from enum import StrEnum, auto
+
 from google.cloud import bigquery
 
 
@@ -17,7 +17,6 @@ class ExportStatus(StrEnum):
     """Outcome of a single BQ extract job."""
 
     SUCCESS = auto()
-    NOT_FOUND = auto()
     FAILED = auto()
 
 
@@ -35,9 +34,6 @@ class ExportJob:
             self.job.result()
             logger.info(f"Completed {self.job.job_id}")
             self.status = ExportStatus.SUCCESS
-        except NotFound:
-            logger.warning(f"Skipped {self.date}: not found")
-            self.status = ExportStatus.NOT_FOUND
         except Exception:
             logger.exception(f"Failed {self.job.job_id} for {self.date}")
             self.status = ExportStatus.FAILED
@@ -60,11 +56,6 @@ class ExportJobResults:
     def succeeded(self) -> list[ExportJob]:
         """Jobs that completed successfully."""
         return self.filter(ExportStatus.SUCCESS)
-
-    @property
-    def skipped(self) -> list[ExportJob]:
-        """Jobs skipped because the source table or shard was not found."""
-        return self.filter(ExportStatus.NOT_FOUND)
 
     def filter(self, status: ExportStatus) -> list[ExportJob]:
         """Return jobs matching the given status."""
