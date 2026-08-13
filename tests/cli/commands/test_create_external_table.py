@@ -37,6 +37,22 @@ def test_create_external_table_with_schema_file(tmp_path):
         )
 
 
+def test_create_external_table_with_description():
+    with patch.object(BigQueryHelper, "create_external_table") as mock_create:
+        CLI(subcommands=[CreateExternalTable]).execute(
+            [
+                "create-external-table",
+                "--project", "proj",
+                "--gcs-path", "gs://bucket/out",
+                "--external-table", "proj.ds.external",
+                "--reference", "proj.ds.source",
+                "--description", "Custom description",
+            ],
+            bq_client_factory=BigQueryHelper.get_client_factory(mocked=True),
+        )
+    assert mock_create.call_args.kwargs["description"] == "Custom description"
+
+
 def test_help():
     with pytest.raises(SystemExit) as exc:
         CLI(subcommands=[CreateExternalTable]).execute(["create-external-table", "--help"])

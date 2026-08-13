@@ -24,6 +24,9 @@ HELP_REFERENCE = (
     "Takes precedence over --schema-file when both are provided."
 )
 HELP_SCHEMA_FILE = "Path to a BigQuery JSON schema. Used when no reference table is available."
+HELP_DESCRIPTION = (
+    "Table description. Overrides the one fetched from --reference or the auto-generated default."
+)
 HELP_SOURCE_FORMAT = (
     "BigQuery external source format (PARQUET, ORC, AVRO, CSV, NEWLINE_DELIMITED_JSON). "
     "Defaults to PARQUET."
@@ -52,6 +55,7 @@ class CreateExternalTable(Command):
             Option("--external-table", type=str, required=True, help=HELP_EXTERNAL_TABLE),
             Option("--reference", type=str, required=False, help=HELP_REFERENCE),
             Option("--schema-file", type=str, required=False, help=HELP_SCHEMA_FILE),
+            Option("--description", type=str, required=False, help=HELP_DESCRIPTION),
             Option("--source-format", type=str, default="PARQUET", help=HELP_SOURCE_FORMAT),
         ]
 
