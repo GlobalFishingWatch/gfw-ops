@@ -84,6 +84,41 @@ def test_falls_back_to_default_description_when_source_has_none(mock_bq_client):
     assert "gs://bucket/out" in kwargs["description"]
 
 
+def test_description_override_takes_precedence_over_reference(mock_bq_client):
+    with patch.object(BigQueryHelper, "create_external_table") as mock_create:
+        run(
+            reference="proj.ds.source",
+            description="Custom description",
+            gcs_path="gs://bucket/out",
+            external_table="proj.ds.external",
+            project="proj",
+            bq_client_factory=lambda **kwargs: mock_bq_client,
+        )
+
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["description"] == "Custom description"
+
+
+def test_description_override_takes_precedence_over_schema_file(tmp_path):
+    schema_file = tmp_path / "schema.json"
+    schema_file.write_text(json.dumps([
+        {"name": "ssvid", "type": "STRING", "mode": "NULLABLE"},
+    ]))
+
+    with patch.object(BigQueryHelper, "create_external_table") as mock_create:
+        run(
+            schema_file=str(schema_file),
+            description="Custom description",
+            gcs_path="gs://bucket/out",
+            external_table="proj.ds.external",
+            project="proj",
+            bq_client_factory=BigQueryHelper.get_client_factory(mocked=True),
+        )
+
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["description"] == "Custom description"
+
+
 def test_raises_on_unsupported_source_format(tmp_path):
     schema_file = tmp_path / "schema.json"
     schema_file.write_text("[]")

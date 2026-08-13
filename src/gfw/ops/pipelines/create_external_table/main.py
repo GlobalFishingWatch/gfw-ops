@@ -27,6 +27,7 @@ def run(
     project: str,
     reference: str | None = None,
     schema_file: str | None = None,
+    description: str | None = None,
     source_format: str = bq_lib.ExternalSourceFormat.PARQUET,
     bq_client_factory: Callable = BigQueryHelper.get_client_factory(),
     unknown_unparsed_args: tuple = (),
@@ -58,6 +59,10 @@ def run(
             Path to a BigQuery JSON schema file. Used when no reference table is
             available. Table description will be auto-generated.
 
+        description:
+            Table description. Overrides the one fetched from ``reference`` or the
+            auto-generated default.
+
         source_format:
             BigQuery external source format (e.g. ``PARQUET``, ``ORC``, ``CSV``).
             Defaults to ``PARQUET``.
@@ -83,10 +88,10 @@ def run(
     if reference is not None:
         source_table = bq.client.get_table(reference)
         bq_schema = Schema(list(source_table.schema))
-        description = source_table.description or default_description
+        description = description or source_table.description or default_description
     else:
         bq_schema = Schema.from_json(schema_file)
-        description = default_description
+        description = description or default_description
 
     glob = _FORMAT_GLOB.get(source_format.upper(), "*")
     logger.info(f"Creating external table {external_table} pointing to {gcs_path}")
