@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Protocol
+from typing import Any
 
 
 class Environment(Enum):
@@ -29,23 +29,15 @@ class Run:
         return self.finished_at - self.started_at
 
 
-class Source(Protocol):
-    """Where the runs of a suite come from."""
-
-    def fetch(self, start: datetime, end: datetime) -> list[Run]:
-        """Return the finished runs that were created in ``[start, end)``.
-
-        Runs that were skipped, cancelled or are still in progress are not returned.
-        """
-
-
 @dataclass(frozen=True)
 class Suite:
     """A test suite to include in the report."""
 
     name: str
     environment: Environment
-    source: Source
+    # Anything with ``fetch(start, end) -> list[Run]`` that returns the finished runs created in
+    # ``[start, end)``, leaving out the ones skipped, cancelled or still in progress.
+    source: Any
 
 
 @dataclass(frozen=True)
