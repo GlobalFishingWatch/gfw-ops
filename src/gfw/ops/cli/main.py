@@ -12,6 +12,7 @@ from gfw.ops.cli.commands.bq_to_parquet import BqToParquet
 from gfw.ops.cli.commands.compact_parquet import CompactParquet
 from gfw.ops.cli.commands.create_external_table import CreateExternalTable
 from gfw.ops.cli.commands.sharded_to_partitioned import ShardedToPartitioned
+from gfw.ops.cli.commands.test_report import WeeklyTestReport
 from gfw.ops.version import __version__
 
 
@@ -26,6 +27,7 @@ def run(args: list[str]) -> None:
             CompactParquet,
             CreateExternalTable,
             BenchmarkParquet,
+            WeeklyTestReport,
         ],
         version=__version__,
         allow_unknown=True,
