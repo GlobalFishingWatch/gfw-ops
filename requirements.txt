@@ -40,6 +40,7 @@ google-api-core==2.31.0
     #   google-cloud-storage-control
 google-auth==2.55.2
     # via
+    #   gfw-ops (pyproject.toml)
     #   gcsfs
     #   google-api-core
     #   google-auth-oauthlib
@@ -144,6 +145,7 @@ pyyaml==6.0.3
     #   gfw-common
 requests==2.34.2
     # via
+    #   gfw-ops (pyproject.toml)
     #   gcsfs
     #   google-api-core
     #   google-cloud-bigquery

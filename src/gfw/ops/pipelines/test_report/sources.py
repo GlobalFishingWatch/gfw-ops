@@ -58,7 +58,7 @@ class CloudBuildSource:
     trigger_name: str
     session: Any = field(default=None, repr=False)
 
-    # SUCCESS passes; these statuses fail. Anything else (QUEUED, WORKING, CANCELLED, ...) is ignored.
+    # SUCCESS passes and these fail. Anything else (QUEUED, WORKING, CANCELLED, ...) is ignored.
     FAILED_STATUSES = frozenset({"FAILURE", "TIMEOUT", "INTERNAL_ERROR"})
 
     def fetch(self, start: datetime, end: datetime) -> list[Run]:
